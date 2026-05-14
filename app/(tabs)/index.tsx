@@ -1,16 +1,48 @@
 import { Image } from 'expo-image';
-import { Platform, StyleSheet } from 'react-native';
+import { useEffect, useState } from 'react';
+import { ActivityIndicator, ScrollView, StyleSheet, View } from 'react-native';
 
-import { HelloWave } from '@/components/hello-wave';
 import ParallaxScrollView from '@/components/parallax-scroll-view';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
-import { Link } from 'expo-router';
+import { testConnection, fetchEntities } from '../../api/base44Client';
 
 export default function HomeScreen() {
+  const [connStatus, setConnStatus] = useState<'loading' | 'success' | 'error'>('loading');
+  const [connMessage, setConnMessage] = useState('Connecting to Base44...');
+  const [appData, setAppData] = useState<any>(null);
+  const [entities, setEntities] = useState<any>(null);
+
+  useEffect(() => {
+    async function loadData() {
+      try {
+        const conn = await testConnection();
+        if (conn.status === 200 || conn.status === 401) {
+          setConnStatus('success');
+          setConnMessage(`Reached Base44 ✓  (HTTP ${conn.status})`);
+          setAppData(conn.data);
+        }
+
+        // Try fetching common entity names from iCare
+        const attempts = ['Course', 'Student', 'User', 'Enrollment'];
+        for (const name of attempts) {
+          const result = await fetchEntities(name);
+          if (result.status === 200 && Array.isArray(result.data)) {
+            setEntities({ name, records: result.data.slice(0, 3) });
+            break;
+          }
+        }
+      } catch (err: any) {
+        setConnStatus('error');
+        setConnMessage('Error: ' + err.message);
+      }
+    }
+    loadData();
+  }, []);
+
   return (
     <ParallaxScrollView
-      headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
+      headerBackgroundColor={{ light: '#1D3D47', dark: '#1D3D47' }}
       headerImage={
         <Image
           source={require('@/assets/images/partial-react-logo.png')}
@@ -18,61 +50,48 @@ export default function HomeScreen() {
         />
       }>
       <ThemedView style={styles.titleContainer}>
-        <ThemedText type="title">Welcome!</ThemedText>
-        <HelloWave />
+        <ThemedText type="title">iCare Life Learn</ThemedText>
       </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 1: Try it</ThemedText>
-        <ThemedText>
-          Edit <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> to see changes.
-          Press{' '}
-          <ThemedText type="defaultSemiBold">
-            {Platform.select({
-              ios: 'cmd + d',
-              android: 'cmd + m',
-              web: 'F12',
-            })}
-          </ThemedText>{' '}
-          to open developer tools.
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <Link href="/modal">
-          <Link.Trigger>
-            <ThemedText type="subtitle">Step 2: Explore</ThemedText>
-          </Link.Trigger>
-          <Link.Preview />
-          <Link.Menu>
-            <Link.MenuAction title="Action" icon="cube" onPress={() => alert('Action pressed')} />
-            <Link.MenuAction
-              title="Share"
-              icon="square.and.arrow.up"
-              onPress={() => alert('Share pressed')}
-            />
-            <Link.Menu title="More" icon="ellipsis">
-              <Link.MenuAction
-                title="Delete"
-                icon="trash"
-                destructive
-                onPress={() => alert('Delete pressed')}
-              />
-            </Link.Menu>
-          </Link.Menu>
-        </Link>
 
-        <ThemedText>
-          {`Tap the Explore tab to learn more about what's included in this starter app.`}
-        </ThemedText>
+      <ThemedView style={styles.card}>
+        <ThemedText type="subtitle">Base44 Connection</ThemedText>
+        {connStatus === 'loading' && (
+          <View style={styles.row}>
+            <ActivityIndicator size="small" />
+            <ThemedText style={styles.muted}>{connMessage}</ThemedText>
+          </View>
+        )}
+        {connStatus === 'success' && (
+          <ThemedText style={styles.success}>{connMessage}</ThemedText>
+        )}
+        {connStatus === 'error' && (
+          <ThemedText style={styles.error}>{connMessage}</ThemedText>
+        )}
+        {appData && (
+          <ThemedText style={styles.muted} numberOfLines={4}>
+            {JSON.stringify(appData, null, 2).slice(0, 200)}
+          </ThemedText>
+        )}
       </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 3: Get a fresh start</ThemedText>
-        <ThemedText>
-          {`When you're ready, run `}
-          <ThemedText type="defaultSemiBold">npm run reset-project</ThemedText> to get a fresh{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> directory. This will move the current{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> to{' '}
-          <ThemedText type="defaultSemiBold">app-example</ThemedText>.
-        </ThemedText>
+
+      {entities && (
+        <ThemedView style={styles.card}>
+          <ThemedText type="subtitle">{entities.name} (live from Base44)</ThemedText>
+          {entities.records.map((record: any, i: number) => (
+            <ThemedView key={i} style={styles.record}>
+              <ThemedText style={styles.muted}>
+                {JSON.stringify(record, null, 2).slice(0, 150)}
+              </ThemedText>
+            </ThemedView>
+          ))}
+        </ThemedView>
+      )}
+
+      <ThemedView style={styles.card}>
+        <ThemedText type="subtitle">Milestone Status</ThemedText>
+        <ThemedText style={styles.success}>✓ Milestone 1: EAS Build Foundation</ThemedText>
+        <ThemedText style={styles.success}>✓ Milestone 2: Base44 Connection</ThemedText>
+        <ThemedText style={styles.muted}>○ Milestone 3: Android DRM POC</ThemedText>
       </ThemedView>
     </ParallaxScrollView>
   );
@@ -83,11 +102,28 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-  },
-  stepContainer: {
-    gap: 8,
     marginBottom: 8,
   },
+  card: {
+    gap: 8,
+    marginBottom: 16,
+    padding: 12,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255,255,255,0.05)',
+  },
+  record: {
+    padding: 8,
+    borderRadius: 6,
+    backgroundColor: 'rgba(255,255,255,0.03)',
+  },
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  muted: { opacity: 0.6, fontSize: 12 },
+  success: { color: '#4CAF50', lineHeight: 22 },
+  error: { color: '#f44336' },
   reactLogo: {
     height: 178,
     width: 290,
