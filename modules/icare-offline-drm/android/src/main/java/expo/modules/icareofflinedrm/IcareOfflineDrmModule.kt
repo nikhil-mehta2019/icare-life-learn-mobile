@@ -64,9 +64,18 @@ class IcareOfflineDrmModule : Module() {
           mediaItemId = params.id,
           uri = Uri.parse(params.manifestUrl),
         )
-        val downloadRequest: DownloadRequest = helper
-          .prepareAsBlocking()
-          .getDownloadRequest(params.id, null)
+        val latch = java.util.concurrent.CountDownLatch(1)
+        val prepErr = java.util.concurrent.atomic.AtomicReference<Throwable?>()
+        helper.prepare(object : androidx.media3.exoplayer.offline.DownloadHelper.Callback {
+          override fun onPrepared(h: androidx.media3.exoplayer.offline.DownloadHelper) { latch.countDown() }
+          override fun onPrepareError(h: androidx.media3.exoplayer.offline.DownloadHelper, e: java.io.IOException) {
+            prepErr.set(e); latch.countDown()
+          }
+        })
+        if (!latch.await(30, java.util.concurrent.TimeUnit.SECONDS))
+          throw java.io.IOException("DownloadHelper timed out")
+        prepErr.get()?.let { throw it }
+        val downloadRequest: DownloadRequest = helper.getDownloadRequest(params.id, null)
         helper.release()
 
         // 3) Hand off to the DownloadService.

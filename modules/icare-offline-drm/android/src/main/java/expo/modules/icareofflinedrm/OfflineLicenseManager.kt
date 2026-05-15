@@ -2,28 +2,17 @@ package expo.modules.icareofflinedrm
 
 import android.content.Context
 import android.util.Base64
-import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
-import androidx.media3.exoplayer.drm.DefaultDrmSessionManager
+import androidx.media3.exoplayer.drm.DrmSessionEventListener
 import androidx.media3.exoplayer.drm.HttpMediaDrmCallback
 import androidx.media3.exoplayer.drm.OfflineLicenseHelper
-import androidx.media3.exoplayer.hls.HlsManifest
 import androidx.media3.exoplayer.offline.DownloadHelper
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 
-/**
- * Acquires & persists Widevine offline licenses. License keySetIds are stored
- * encrypted at rest with EncryptedSharedPreferences (AES-256-GCM under a key
- * managed by the Android Keystore).
- *
- * Mux's Widevine license endpoint expects the per-playback DRM token to be
- * sent via the `x-mux-license-token` header. We forward it on every license
- * request (initial + renewal).
- */
 @UnstableApi
 object OfflineLicenseManager {
   private const val PREFS_NAME = "icare_offline_drm"
@@ -45,20 +34,13 @@ object OfflineLicenseManager {
     val b64 = getKeySetIdB64(ctx, downloadId) ?: return
     try {
       val keySetId = Base64.decode(b64, Base64.NO_WRAP)
-      newOfflineHelper(licenseUrl = null, licenseToken = null).use { helper ->
-        helper.releaseLicense(keySetId)
-      }
+      val helper = newOfflineHelper(licenseUrl = "", licenseToken = null)
+      helper.releaseLicense(keySetId)
+      helper.release()
     } catch (_: Throwable) { /* best-effort */ }
     prefs(ctx).edit().remove(KEY_PREFIX + downloadId).apply()
   }
 
-  /**
-   * Acquires an offline Widevine license for the given HLS manifest and
-   * stores the keySetId for later playback.
-   *
-   * Strategy: download the HLS manifest via DownloadHelper → extract a
-   * `Format` containing PSSH/DRM init data → call OfflineLicenseHelper.
-   */
   fun acquireAndStore(
     ctx: Context,
     downloadId: String,
@@ -71,7 +53,7 @@ object OfflineLicenseManager {
       .setUri(manifestUrl)
       .build()
 
-    val httpFactory = DefaultHttpDataSource.Factory().setUserAgent("IcareLifeLearn-OfflineLic/1.0")
+    val httpFactory = DefaultHttpDataSource.Factory().setUserAgent("IcareLifeLearn/1.0")
     val helper = DownloadHelper.forMediaItem(
       ctx, mediaItem, DefaultRenderersFactory(ctx), httpFactory,
     )
@@ -85,13 +67,12 @@ object OfflineLicenseManager {
       }
     })
     if (!latch.await(30, java.util.concurrent.TimeUnit.SECONDS))
-      throw java.io.IOException("DownloadHelper prep timed out (license)")
+      throw java.io.IOException("DownloadHelper prep timed out")
     errRef.get()?.let { throw it }
 
-    // Pull a Format with DRM init data from one of the prepared periods.
     val format = findDrmFormat(helper) ?: run {
       helper.release()
-      throw IllegalStateException("No DRM-protected Format found in manifest $manifestUrl")
+      throw IllegalStateException("No DRM Format found in $manifestUrl")
     }
 
     val offlineHelper = newOfflineHelper(licenseUrl, licenseToken)
@@ -107,19 +88,21 @@ object OfflineLicenseManager {
       .apply()
   }
 
-  private fun newOfflineHelper(
-    licenseUrl: String?,
-    licenseToken: String?,
-  ): OfflineLicenseHelper {
-    val httpFactory = DefaultHttpDataSource.Factory().setUserAgent("IcareLifeLearn-OfflineLic/1.0")
-    val callback = HttpMediaDrmCallback(licenseUrl ?: "", httpFactory)
+  private fun newOfflineHelper(licenseUrl: String, licenseToken: String?): OfflineLicenseHelper {
+    val httpFactory = DefaultHttpDataSource.Factory().setUserAgent("IcareLifeLearn/1.0")
+    val callback = HttpMediaDrmCallback(licenseUrl, httpFactory)
     if (!licenseToken.isNullOrEmpty()) {
-      // Mux convention: per-playback license token sent as a header.
       callback.setKeyRequestProperty("x-mux-license-token", licenseToken)
     }
-    return OfflineLicenseHelper.newWidevineInstance(
-      callback,
-      androidx.media3.exoplayer.drm.DrmSessionEventListener.EventDispatcher(),
+    return OfflineLicenseHelper(
+      androidx.media3.exoplayer.drm.DefaultDrmSessionManager.Builder()
+        .setUuidAndExoMediaDrmProvider(
+          androidx.media3.common.C.WIDEVINE_UUID,
+          androidx.media3.exoplayer.drm.FrameworkMediaDrm.DEFAULT_PROVIDER,
+        )
+        .setMultiSession(false)
+        .build(callback),
+      DrmSessionEventListener.EventDispatcher(),
     )
   }
 

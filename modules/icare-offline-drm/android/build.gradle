@@ -4,16 +4,6 @@ apply plugin: 'kotlin-android'
 group = 'expo.modules.icareofflinedrm'
 version = '0.1.0'
 
-buildscript {
-  def kotlinVersion = rootProject.ext.has("kotlinVersion") ? rootProject.ext.get("kotlinVersion") : "1.9.23"
-  repositories {
-    mavenCentral()
-  }
-  dependencies {
-    classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlinVersion")
-  }
-}
-
 android {
   namespace "expo.modules.icareofflinedrm"
   compileSdkVersion rootProject.ext.has("compileSdkVersion") ? rootProject.ext.get("compileSdkVersion") : 34
@@ -27,11 +17,11 @@ android {
     buildConfig true
   }
   compileOptions {
-    sourceCompatibility JavaVersion.VERSION_17
-    targetCompatibility JavaVersion.VERSION_17
+    sourceCompatibility JavaVersion.VERSION_11
+    targetCompatibility JavaVersion.VERSION_11
   }
   kotlinOptions {
-    jvmTarget = "17"
+    jvmTarget = "11"
   }
 }
 
