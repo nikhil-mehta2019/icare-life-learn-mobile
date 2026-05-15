@@ -1,112 +1,106 @@
-import { Image } from 'expo-image';
-import { Platform, StyleSheet } from 'react-native';
+import { useRouter, type Href } from 'expo-router';
+import { useCallback, useRef } from 'react';
+import { StyleSheet } from 'react-native';
+import { WebView, type WebViewMessageEvent } from 'react-native-webview';
+import type { ShouldStartLoadRequest } from 'react-native-webview/lib/WebViewTypes';
 
-import { Collapsible } from '@/components/ui/collapsible';
-import { ExternalLink } from '@/components/external-link';
-import ParallaxScrollView from '@/components/parallax-scroll-view';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { IconSymbol } from '@/components/ui/icon-symbol';
-import { Fonts } from '@/constants/theme';
+const BASE44_URL = 'https://icare-life-learn.base44.app';
 
-export default function TabTwoScreen() {
+/**
+ * URL patterns that mean "open this chapter in the native player".
+ * Adjust these to match the routes the Base44 web app actually uses for the
+ * student chapter player. We intentionally accept several common shapes.
+ *
+ *  - /chapter/:id
+ *  - /student/chapter/:id
+ *  - /chapter-player?id=:id   (Base44 default page-name → URL)
+ *  - /ChapterPlayer?id=:id
+ */
+const CHAPTER_PATH_PATTERNS: RegExp[] = [
+  /\/chapter\/([A-Za-z0-9_-]{8,})\b/,
+  /\/student\/chapter\/([A-Za-z0-9_-]{8,})\b/,
+  /\/chapter-player\?(?:.*&)?id=([A-Za-z0-9_-]{8,})/,
+  /\/ChapterPlayer\?(?:.*&)?id=([A-Za-z0-9_-]{8,})/,
+];
+
+function extractChapterId(url: string): string | null {
+  for (const re of CHAPTER_PATH_PATTERNS) {
+    const m = url.match(re);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+/**
+ * Optional JS bridge: injected into the WebView so the Base44 web app can
+ * explicitly request native playback. Web side calls
+ *   window.ReactNativeWebView.postMessage(JSON.stringify({type:'OPEN_CHAPTER', chapterId}))
+ */
+const INJECTED_JS = `
+  (function() {
+    if (window.__icareNativeBridgeInstalled) return;
+    window.__icareNativeBridgeInstalled = true;
+    window.icareNative = {
+      openChapter: function(id) {
+        window.ReactNativeWebView && window.ReactNativeWebView.postMessage(
+          JSON.stringify({ type: 'OPEN_CHAPTER', chapterId: id })
+        );
+      }
+    };
+    true;
+  })();
+`;
+
+export default function ExploreScreen() {
+  const router = useRouter();
+  const webRef = useRef<WebView>(null);
+
+  const onShouldStartLoadWithRequest = useCallback(
+    (req: ShouldStartLoadRequest) => {
+      const id = extractChapterId(req.url);
+      if (id) {
+        router.push({ pathname: '/player/[chapterId]', params: { chapterId: id } } as unknown as Href);
+        return false; // cancel WebView nav
+      }
+      return true;
+    },
+    [router]
+  );
+
+  const onMessage = useCallback(
+    (e: WebViewMessageEvent) => {
+      try {
+        const msg = JSON.parse(e.nativeEvent.data);
+        if (msg?.type === 'OPEN_CHAPTER' && typeof msg.chapterId === 'string') {
+          router.push({ pathname: '/player/[chapterId]', params: { chapterId: msg.chapterId } } as unknown as Href);
+        }
+      } catch {
+        // Non-JSON messages are ignored — WebView posts other things too.
+      }
+    },
+    [router]
+  );
+
   return (
-    <ParallaxScrollView
-      headerBackgroundColor={{ light: '#D0D0D0', dark: '#353636' }}
-      headerImage={
-        <IconSymbol
-          size={310}
-          color="#808080"
-          name="chevron.left.forwardslash.chevron.right"
-          style={styles.headerImage}
-        />
-      }>
-      <ThemedView style={styles.titleContainer}>
-        <ThemedText
-          type="title"
-          style={{
-            fontFamily: Fonts.rounded,
-          }}>
-          Explore
-        </ThemedText>
-      </ThemedView>
-      <ThemedText>This app includes example code to help you get started.</ThemedText>
-      <Collapsible title="File-based routing">
-        <ThemedText>
-          This app has two screens:{' '}
-          <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> and{' '}
-          <ThemedText type="defaultSemiBold">app/(tabs)/explore.tsx</ThemedText>
-        </ThemedText>
-        <ThemedText>
-          The layout file in <ThemedText type="defaultSemiBold">app/(tabs)/_layout.tsx</ThemedText>{' '}
-          sets up the tab navigator.
-        </ThemedText>
-        <ExternalLink href="https://docs.expo.dev/router/introduction">
-          <ThemedText type="link">Learn more</ThemedText>
-        </ExternalLink>
-      </Collapsible>
-      <Collapsible title="Android, iOS, and web support">
-        <ThemedText>
-          You can open this project on Android, iOS, and the web. To open the web version, press{' '}
-          <ThemedText type="defaultSemiBold">w</ThemedText> in the terminal running this project.
-        </ThemedText>
-      </Collapsible>
-      <Collapsible title="Images">
-        <ThemedText>
-          For static images, you can use the <ThemedText type="defaultSemiBold">@2x</ThemedText> and{' '}
-          <ThemedText type="defaultSemiBold">@3x</ThemedText> suffixes to provide files for
-          different screen densities
-        </ThemedText>
-        <Image
-          source={require('@/assets/images/react-logo.png')}
-          style={{ width: 100, height: 100, alignSelf: 'center' }}
-        />
-        <ExternalLink href="https://reactnative.dev/docs/images">
-          <ThemedText type="link">Learn more</ThemedText>
-        </ExternalLink>
-      </Collapsible>
-      <Collapsible title="Light and dark mode components">
-        <ThemedText>
-          This template has light and dark mode support. The{' '}
-          <ThemedText type="defaultSemiBold">useColorScheme()</ThemedText> hook lets you inspect
-          what the user&apos;s current color scheme is, and so you can adjust UI colors accordingly.
-        </ThemedText>
-        <ExternalLink href="https://docs.expo.dev/develop/user-interface/color-themes/">
-          <ThemedText type="link">Learn more</ThemedText>
-        </ExternalLink>
-      </Collapsible>
-      <Collapsible title="Animations">
-        <ThemedText>
-          This template includes an example of an animated component. The{' '}
-          <ThemedText type="defaultSemiBold">components/HelloWave.tsx</ThemedText> component uses
-          the powerful{' '}
-          <ThemedText type="defaultSemiBold" style={{ fontFamily: Fonts.mono }}>
-            react-native-reanimated
-          </ThemedText>{' '}
-          library to create a waving hand animation.
-        </ThemedText>
-        {Platform.select({
-          ios: (
-            <ThemedText>
-              The <ThemedText type="defaultSemiBold">components/ParallaxScrollView.tsx</ThemedText>{' '}
-              component provides a parallax effect for the header image.
-            </ThemedText>
-          ),
-        })}
-      </Collapsible>
-    </ParallaxScrollView>
+    <WebView
+      ref={webRef}
+      source={{ uri: BASE44_URL }}
+      style={styles.webview}
+      javaScriptEnabled
+      domStorageEnabled
+      sharedCookiesEnabled
+      thirdPartyCookiesEnabled
+      allowsInlineMediaPlayback
+      allowsFullscreenVideo
+      mediaPlaybackRequiresUserAction={false}
+      androidLayerType="hardware"
+      injectedJavaScriptBeforeContentLoaded={INJECTED_JS}
+      onShouldStartLoadWithRequest={onShouldStartLoadWithRequest}
+      onMessage={onMessage}
+    />
   );
 }
 
 const styles = StyleSheet.create({
-  headerImage: {
-    color: '#808080',
-    bottom: -90,
-    left: -35,
-    position: 'absolute',
-  },
-  titleContainer: {
-    flexDirection: 'row',
-    gap: 8,
-  },
+  webview: { flex: 1 },
 });
