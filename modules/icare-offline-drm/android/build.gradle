@@ -1,5 +1,4 @@
 apply plugin: 'com.android.library'
-apply plugin: 'kotlin-android'
 
 group = 'expo.modules.icareofflinedrm'
 version = '0.1.0'
@@ -12,7 +11,10 @@ useExpoPublishing()
 
 android {
   namespace "expo.modules.icareofflinedrm"
+  compileSdkVersion safeExtGet("compileSdkVersion", 35)
   defaultConfig {
+    minSdkVersion safeExtGet("minSdkVersion", 24)
+    targetSdkVersion safeExtGet("targetSdkVersion", 35)
     versionCode 1
     versionName "0.1.0"
   }
@@ -22,17 +24,17 @@ android {
   kotlinOptions {
     jvmTarget = JavaVersion.VERSION_17.toString()
   }
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_17
+    targetCompatibility JavaVersion.VERSION_17
+  }
 }
 
 dependencies {
-  // Use the Media3 / ExoPlayer family that ships with react-native-video 6.x.
-  // We pin to 1.4.x — known compatible with rn-video 6.16.x.
   def media3Version = "1.4.1"
   implementation "androidx.media3:media3-exoplayer:${media3Version}"
   implementation "androidx.media3:media3-exoplayer-hls:${media3Version}"
   implementation "androidx.media3:media3-exoplayer-dash:${media3Version}"
-  implementation "androidx.media3:media3-datasource-cronet:${media3Version}"
   implementation "androidx.media3:media3-datasource-okhttp:${media3Version}"
-
   implementation "androidx.security:security-crypto:1.1.0-alpha06"
 }
