@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-var-requires */
-const { withAndroidManifest, AndroidConfig } = require('@expo/config-plugins');
+const { withAndroidManifest, AndroidConfig } = require('expo/config-plugins');
 
 /**
  * Expo config plugin that registers the OfflineDownloadService in the

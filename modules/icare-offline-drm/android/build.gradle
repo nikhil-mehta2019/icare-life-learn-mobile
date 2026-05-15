@@ -1,31 +1,17 @@
-buildscript {
-  ext.safeExtGet = { prop, fallback ->
-    rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
-  }
-  ext.getKotlinVersion = {
-    safeExtGet("kotlinVersion", "1.8.10")
-  }
-  repositories {
-    mavenCentral()
-    google()
-  }
-  dependencies {
-    classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:${getKotlinVersion()}")
-  }
-}
-
 apply plugin: 'com.android.library'
-apply plugin: 'kotlin-android'
 
 group = 'expo.modules.icareofflinedrm'
 version = '0.1.0'
 
+def expoModulesCorePlugin = new File(project(":expo-modules-core").projectDir.absolutePath, "ExpoModulesCorePlugin.gradle")
+apply from: expoModulesCorePlugin
+applyKotlinExpoModulesCorePlugin()
+useCoreDependencies()
+useDefaultAndroidSdkVersions()
+
 android {
   namespace "expo.modules.icareofflinedrm"
-  compileSdkVersion rootProject.ext.has("compileSdkVersion") ? rootProject.ext.get("compileSdkVersion") : 34
   defaultConfig {
-    minSdkVersion rootProject.ext.has("minSdkVersion") ? rootProject.ext.get("minSdkVersion") : 24
-    targetSdkVersion rootProject.ext.has("targetSdkVersion") ? rootProject.ext.get("targetSdkVersion") : 34
     versionCode 1
     versionName "0.1.0"
   }
@@ -47,8 +33,6 @@ repositories {
 }
 
 dependencies {
-  implementation project(':expo-modules-core')
-
   def media3Version = "1.4.1"
   implementation "androidx.media3:media3-exoplayer:${media3Version}"
   implementation "androidx.media3:media3-exoplayer-hls:${media3Version}"
