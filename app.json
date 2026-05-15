@@ -47,18 +47,6 @@
           }
         }
       ],
-      [
-        "react-native-video",
-        {
-          "enableNotificationControls": false,
-          "androidExtensions": {
-            "useExoplayerHls": true,
-            "useExoplayerDash": true,
-            "useExoplayerSmoothStreaming": false,
-            "useExoplayerRtsp": false
-          }
-        }
-      ],
       "./modules/icare-offline-drm/app.plugin.js"
     ],
     "android": {
