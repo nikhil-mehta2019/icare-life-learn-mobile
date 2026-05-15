@@ -1,36 +1,48 @@
 apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
 
 group = 'expo.modules.icareofflinedrm'
 version = '0.1.0'
 
-def expoModulesCorePlugin = new File(project(":expo-modules-core").projectDir.absolutePath, "ExpoModulesCorePlugin.gradle")
-apply from: expoModulesCorePlugin
-applyKotlinExpoModulesCorePlugin()
-useCoreDependencies()
-useExpoPublishing()
+buildscript {
+  def kotlinVersion = rootProject.ext.has("kotlinVersion") ? rootProject.ext.get("kotlinVersion") : "1.9.23"
+  repositories {
+    mavenCentral()
+  }
+  dependencies {
+    classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlinVersion")
+  }
+}
 
 android {
   namespace "expo.modules.icareofflinedrm"
-  compileSdkVersion safeExtGet("compileSdkVersion", 35)
+  compileSdkVersion rootProject.ext.has("compileSdkVersion") ? rootProject.ext.get("compileSdkVersion") : 35
   defaultConfig {
-    minSdkVersion safeExtGet("minSdkVersion", 24)
-    targetSdkVersion safeExtGet("targetSdkVersion", 35)
+    minSdkVersion rootProject.ext.has("minSdkVersion") ? rootProject.ext.get("minSdkVersion") : 24
+    targetSdkVersion rootProject.ext.has("targetSdkVersion") ? rootProject.ext.get("targetSdkVersion") : 35
     versionCode 1
     versionName "0.1.0"
   }
   buildFeatures {
     buildConfig true
   }
-  kotlinOptions {
-    jvmTarget = JavaVersion.VERSION_17.toString()
-  }
   compileOptions {
     sourceCompatibility JavaVersion.VERSION_17
     targetCompatibility JavaVersion.VERSION_17
   }
+  kotlinOptions {
+    jvmTarget = "17"
+  }
+}
+
+repositories {
+  mavenCentral()
+  google()
 }
 
 dependencies {
+  implementation project(':expo-modules-core')
+
   def media3Version = "1.4.1"
   implementation "androidx.media3:media3-exoplayer:${media3Version}"
   implementation "androidx.media3:media3-exoplayer-hls:${media3Version}"
