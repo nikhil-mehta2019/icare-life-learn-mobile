@@ -1,0 +1,42 @@
+apply plugin: 'com.android.library'
+
+group = 'expo.modules.icareofflinedrm'
+version = '0.1.0'
+
+def expoModulesCorePlugin = new File(project(":expo-modules-core").projectDir.absolutePath, "ExpoModulesCorePlugin.gradle")
+apply from: expoModulesCorePlugin
+applyKotlinExpoModulesCorePlugin()
+useCoreDependencies()
+useDefaultAndroidSdkVersions()
+
+android {
+  namespace "expo.modules.icareofflinedrm"
+  defaultConfig {
+    versionCode 1
+    versionName "0.1.0"
+  }
+  buildFeatures {
+    buildConfig true
+  }
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_11
+    targetCompatibility JavaVersion.VERSION_11
+  }
+  kotlinOptions {
+    jvmTarget = "11"
+  }
+}
+
+repositories {
+  mavenCentral()
+  google()
+}
+
+dependencies {
+  def media3Version = "1.4.1"
+  implementation "androidx.media3:media3-exoplayer:${media3Version}"
+  implementation "androidx.media3:media3-exoplayer-hls:${media3Version}"
+  implementation "androidx.media3:media3-exoplayer-dash:${media3Version}"
+  implementation "androidx.media3:media3-datasource-okhttp:${media3Version}"
+  implementation "androidx.security:security-crypto:1.1.0-alpha06"
+}
