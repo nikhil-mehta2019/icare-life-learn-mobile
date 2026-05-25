@@ -6,8 +6,10 @@ import {
   Pressable,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
 } from 'react-native';
+import { GestureDetector, Gesture, GestureHandlerRootView } from 'react-native-gesture-handler';
 import Video, { type VideoRef, type ReactVideoSource, type DRMType } from 'react-native-video';
 
 import { fetchChapter, getMuxToken } from '../../api/base44Client';
@@ -39,6 +41,8 @@ export default function ChapterPlayerScreen() {
   const { chapterId } = useLocalSearchParams<{ chapterId: string }>();
   const router = useRouter();
   const videoRef = useRef<VideoRef>(null);
+  const { width, height } = useWindowDimensions();
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   const [mode, setMode] = useState<Mode>('loading');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -197,24 +201,44 @@ export default function ChapterPlayerScreen() {
     );
   }
 
+  // Pinch gesture: spreading fingers → fullscreen, pinching in → exit fullscreen
+  const pinchGesture = Gesture.Pinch()
+    .runOnJS(true)
+    .onEnd((e) => {
+      if (e.scale > 1.2 && !isFullscreen) {
+        setIsFullscreen(true);
+        videoRef.current?.presentFullscreenPlayer();
+      } else if (e.scale < 0.8 && isFullscreen) {
+        setIsFullscreen(false);
+        videoRef.current?.dismissFullscreenPlayer();
+      }
+    });
+
+  // Natural player height based on screen width, 16:9
+  const playerHeight = (width / 16) * 9;
+
   return (
-    <View style={styles.container}>
-      <View style={styles.playerWrap}>
-        {source && (
-          <Video
-            ref={videoRef}
-            source={source}
-            drm={drm}
-            controls
-            resizeMode="contain"
-            style={StyleSheet.absoluteFill}
-            onError={(e: any) => {
-              console.warn('[player] error', e);
-              Alert.alert('Playback error', JSON.stringify(e?.error ?? e));
-            }}
-          />
-        )}
-      </View>
+    <GestureHandlerRootView style={styles.container}>
+      <GestureDetector gesture={pinchGesture}>
+        <View style={[styles.playerWrap, { width, height: playerHeight }]}>
+          {source && (
+            <Video
+              ref={videoRef}
+              source={source}
+              drm={drm}
+              controls
+              resizeMode="contain"
+              fullscreen={isFullscreen}
+              onFullscreenPlayerDidDismiss={() => setIsFullscreen(false)}
+              style={StyleSheet.absoluteFill}
+              onError={(e: any) => {
+                console.warn('[player] error', e);
+                Alert.alert('Playback error', JSON.stringify(e?.error ?? e));
+              }}
+            />
+          )}
+        </View>
+      </GestureDetector>
 
       <View style={styles.metaRow}>
         <Text style={styles.title} numberOfLines={2}>
@@ -231,7 +255,7 @@ export default function ChapterPlayerScreen() {
         onDownload={handleDownload}
         onDelete={handleDeleteDownload}
       />
-    </View>
+    </GestureHandlerRootView>
   );
 }
 
@@ -287,7 +311,7 @@ function DownloadControls({
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
-  playerWrap: { aspectRatio: 16 / 9, backgroundColor: '#000', position: 'relative' },
+  playerWrap: { backgroundColor: '#000', position: 'relative' },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 16, gap: 8 },
   metaRow: { flexDirection: 'row', alignItems: 'center', padding: 12, gap: 12 },
   title: { color: '#fff', fontSize: 16, fontWeight: '600', flex: 1 },
