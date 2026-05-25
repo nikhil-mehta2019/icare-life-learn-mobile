@@ -14,8 +14,12 @@ import {
 import { getItemAsync, setItemAsync } from 'expo-secure-store';
 import { GestureDetector, Gesture, GestureHandlerRootView } from 'react-native-gesture-handler';
 import Video, { type VideoRef, type ReactVideoSource, type DRMType } from 'react-native-video';
-
-import { fetchChapter, getMuxToken } from '../../api/base44Client';
+import {
+  fetchChapter,
+  getMuxToken,
+  selectMuxPlaybackId,
+  type Chapter,
+} from '../../api/base44Client';
 import IcareOfflineDrm, {
   onDownloadProgress,
   type DownloadInfo,
@@ -23,15 +27,6 @@ import IcareOfflineDrm, {
 } from '../../modules/icare-offline-drm';
 
 type Mode = 'loading' | 'online' | 'offline' | 'error';
-
-interface ChapterMeta {
-  id: string;
-  title?: string;
-  muxPlaybackId?: string;
-  muxDrmProtected?: boolean;
-  muxSignedPlaybackRequired?: boolean;
-  videoPosterUrl?: string;
-}
 
 interface MuxTokenResponse {
   token: string;
@@ -44,7 +39,7 @@ export default function ChapterPlayerScreen() {
   const { chapterId } = useLocalSearchParams<{ chapterId: string }>();
   const router = useRouter();
   const videoRef = useRef<VideoRef>(null);
-  const { width, height } = useWindowDimensions();
+  const { width } = useWindowDimensions();
   const [isFullscreen, setIsFullscreen] = useState(false);
 
   const [mode, setMode] = useState<Mode>('loading');
@@ -52,7 +47,7 @@ export default function ChapterPlayerScreen() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [audioToastVisible, setAudioToastVisible] = useState(false);
   const audioToastOpacity = useRef(new Animated.Value(0)).current;
-  const [chapter, setChapter] = useState<ChapterMeta | null>(null);
+  const [chapter, setChapter] = useState<Chapter | null>(null);
   const [tokens, setTokens] = useState<MuxTokenResponse | null>(null);
   const [offline, setOffline] = useState<OfflinePlaybackSource | null>(null);
   const [download, setDownload] = useState<DownloadInfo | null>(null);
@@ -68,10 +63,9 @@ export default function ChapterPlayerScreen() {
         const off = await IcareOfflineDrm.getOfflineSource({ id: chapterId });
         if (cancelled) return;
         if (off) {
-          // Still load chapter meta for the title/poster.
           const ch = await fetchChapter(chapterId);
           if (cancelled) return;
-          setChapter({ id: chapterId, ...ch.data });
+          setChapter(ch.data);
           setOffline(off);
           setMode('offline');
           return;
@@ -81,14 +75,19 @@ export default function ChapterPlayerScreen() {
         const ch = await fetchChapter(chapterId);
         if (cancelled) return;
         if (ch.status !== 200) throw new Error(`Chapter fetch ${ch.status}`);
-        const meta: ChapterMeta = { id: chapterId, ...ch.data };
+
+        const meta = ch.data;
         setChapter(meta);
 
-        if (!meta.muxPlaybackId) {
-          throw new Error('Chapter has no muxPlaybackId');
+        // 3) Select the correct Mux playback ID.
+        //    Priority: DRM playback ID > Signed playback ID > Public playback ID.
+        //    Using the wrong ID causes unsigned streams or failed DRM license requests.
+        const playbackId = selectMuxPlaybackId(meta);
+        if (!playbackId) {
+          throw new Error('Chapter has no Mux playback ID configured');
         }
 
-        const tk = await getMuxToken(meta.muxPlaybackId);
+        const tk = await getMuxToken(playbackId);
         if (cancelled) return;
         setTokens(tk);
         setMode('online');
@@ -149,9 +148,6 @@ export default function ChapterPlayerScreen() {
       return {
         uri: offline.uri,
         type: 'm3u8',
-        // react-native-video honors `cacheKey` to look the asset up from
-        // ExoPlayer's cache. The DRM block uses the offline keySetId so
-        // ExoPlayer doesn't hit the license server.
         cacheKey: offline.cacheKey,
       } as ReactVideoSource;
     }
@@ -166,8 +162,6 @@ export default function ChapterPlayerScreen() {
     if (mode === 'offline' && offline) {
       return {
         type: 'widevine' as DRMType,
-        // Tell ExoPlayer to use the persisted offline license — no network
-        // license request happens for the offline path.
         offlineLicense: offline.offlineLicenseKeySetId,
       };
     }
@@ -182,10 +176,11 @@ export default function ChapterPlayerScreen() {
   }, [mode, offline, tokens]);
 
   const handleDownload = async () => {
-    if (!chapter || !chapter.muxPlaybackId) return;
+    if (!chapter) return;
+    const playbackId = selectMuxPlaybackId(chapter);
+    if (!playbackId) return;
     try {
-      // Always fetch fresh tokens before initiating an offline license request.
-      const tk = await getMuxToken(chapter.muxPlaybackId);
+      const tk = await getMuxToken(playbackId);
       await IcareOfflineDrm.startDownload({
         id: chapter.id,
         manifestUrl: tk.secureStreamUrl,
@@ -203,15 +198,17 @@ export default function ChapterPlayerScreen() {
     await IcareOfflineDrm.removeDownload(chapterId);
     setDownload(null);
     setOffline(null);
-    // Re-resolve to fall back to online.
-    if (chapter?.muxPlaybackId) {
-      try {
-        const tk = await getMuxToken(chapter.muxPlaybackId);
-        setTokens(tk);
-        setMode('online');
-      } catch (err: any) {
-        setErrorMsg(err?.message ?? String(err));
-        setMode('error');
+    if (chapter) {
+      const playbackId = selectMuxPlaybackId(chapter);
+      if (playbackId) {
+        try {
+          const tk = await getMuxToken(playbackId);
+          setTokens(tk);
+          setMode('online');
+        } catch (err: any) {
+          setErrorMsg(err?.message ?? String(err));
+          setMode('error');
+        }
       }
     }
   };
