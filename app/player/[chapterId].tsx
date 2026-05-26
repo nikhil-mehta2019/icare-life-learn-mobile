@@ -4,12 +4,14 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Animated,
   Pressable,
   StyleSheet,
   Text,
   useWindowDimensions,
   View,
 } from 'react-native';
+import { getItemAsync, setItemAsync } from 'expo-secure-store';
 import { GestureDetector, Gesture, GestureHandlerRootView } from 'react-native-gesture-handler';
 import Video, { type VideoRef, type ReactVideoSource, type DRMType } from 'react-native-video';
 
@@ -48,6 +50,8 @@ export default function ChapterPlayerScreen() {
   const [mode, setMode] = useState<Mode>('loading');
   const [isPlaying, setIsPlaying] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [audioToastVisible, setAudioToastVisible] = useState(false);
+  const audioToastOpacity = useRef(new Animated.Value(0)).current;
   const [chapter, setChapter] = useState<ChapterMeta | null>(null);
   const [tokens, setTokens] = useState<MuxTokenResponse | null>(null);
   const [offline, setOffline] = useState<OfflinePlaybackSource | null>(null);
@@ -108,6 +112,25 @@ export default function ChapterPlayerScreen() {
     });
     return () => sub.remove();
   }, [chapterId]);
+
+  // ----- Audio language toast: show once per device if multiple tracks found. -----
+  const handleVideoLoad = async (data: any) => {
+    const tracks: any[] = data?.audioTracks ?? [];
+    if (tracks.length <= 1) return;
+    try {
+      const seen = await getItemAsync('audio_lang_hint_shown');
+      if (seen) return;
+      await setItemAsync('audio_lang_hint_shown', '1');
+    } catch {
+      // SecureStore unavailable — show toast anyway
+    }
+    setAudioToastVisible(true);
+    Animated.sequence([
+      Animated.timing(audioToastOpacity, { toValue: 1, duration: 300, useNativeDriver: true }),
+      Animated.delay(4000),
+      Animated.timing(audioToastOpacity, { toValue: 0, duration: 400, useNativeDriver: true }),
+    ]).start(() => setAudioToastVisible(false));
+  };
 
   // ----- Keep screen awake while playing, release on pause/end/unmount. -----
   useEffect(() => {
@@ -243,6 +266,7 @@ export default function ChapterPlayerScreen() {
               resizeMode="contain"
               fullscreen={isFullscreen}
               onFullscreenPlayerDidDismiss={() => setIsFullscreen(false)}
+              onLoad={handleVideoLoad}
               onPlaybackStateChanged={({ isPlaying: playing }) => setIsPlaying(playing)}
               onEnd={() => setIsPlaying(false)}
               style={StyleSheet.absoluteFill}
@@ -252,6 +276,19 @@ export default function ChapterPlayerScreen() {
                 Alert.alert('Playback error', JSON.stringify(e?.error ?? e));
               }}
             />
+          )}
+          {audioToastVisible && (
+            <Animated.View style={[styles.audioToast, { opacity: audioToastOpacity }]}>
+              <Text style={styles.audioToastText}>
+                Multiple audio languages available. Select your preferred language from player settings.
+              </Text>
+              <Pressable onPress={() => {
+                audioToastOpacity.setValue(0);
+                setAudioToastVisible(false);
+              }}>
+                <Text style={styles.audioToastDismiss}>✕</Text>
+              </Pressable>
+            </Animated.View>
           )}
         </View>
       </GestureDetector>
@@ -344,4 +381,27 @@ const styles = StyleSheet.create({
   btnText: { color: '#fff', fontWeight: '600' },
   muted: { color: 'rgba(255,255,255,0.6)', fontSize: 13 },
   error: { color: '#f88', fontSize: 14 },
+  audioToast: {
+    position: 'absolute',
+    bottom: 16,
+    left: 12,
+    right: 12,
+    backgroundColor: 'rgba(0,0,0,0.82)',
+    borderRadius: 8,
+    padding: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  audioToastText: {
+    color: '#fff',
+    fontSize: 13,
+    flex: 1,
+    lineHeight: 18,
+  },
+  audioToastDismiss: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 16,
+    paddingHorizontal: 4,
+  },
 });
