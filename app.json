@@ -39,10 +39,12 @@
             "minSdkVersion": 24,
             "compileSdkVersion": 34,
             "targetSdkVersion": 34,
-            "extraMavenRepos": []
+            "extraMavenRepos": [],
+            "newArchEnabled": false
           },
           "ios": {
-            "deploymentTarget": "15.1"
+            "deploymentTarget": "15.1",
+            "newArchEnabled": false
           }
         }
       ],
@@ -65,7 +67,8 @@
       ]
     },
     "experiments": {
-      "typedRoutes": true
+      "typedRoutes": true,
+      "newArchEnabled": false
     },
     "extra": {
       "router": {},

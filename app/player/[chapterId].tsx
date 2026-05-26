@@ -1,4 +1,5 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -45,6 +46,7 @@ export default function ChapterPlayerScreen() {
   const [isFullscreen, setIsFullscreen] = useState(false);
 
   const [mode, setMode] = useState<Mode>('loading');
+  const [isPlaying, setIsPlaying] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [chapter, setChapter] = useState<ChapterMeta | null>(null);
   const [tokens, setTokens] = useState<MuxTokenResponse | null>(null);
@@ -106,6 +108,17 @@ export default function ChapterPlayerScreen() {
     });
     return () => sub.remove();
   }, [chapterId]);
+
+  // ----- Keep screen awake while playing, release on pause/end/unmount. -----
+  useEffect(() => {
+    const TAG = 'video-player';
+    if (isPlaying) {
+      activateKeepAwakeAsync(TAG);
+    } else {
+      deactivateKeepAwake(TAG);
+    }
+    return () => { deactivateKeepAwake(TAG); };
+  }, [isPlaying]);
 
   // ----- Build the Video source. -----
   const source: ReactVideoSource | null = useMemo(() => {
@@ -230,8 +243,11 @@ export default function ChapterPlayerScreen() {
               resizeMode="contain"
               fullscreen={isFullscreen}
               onFullscreenPlayerDidDismiss={() => setIsFullscreen(false)}
+              onPlaybackStateChanged={({ isPlaying: playing }) => setIsPlaying(playing)}
+              onEnd={() => setIsPlaying(false)}
               style={StyleSheet.absoluteFill}
               onError={(e: any) => {
+                setIsPlaying(false);
                 console.warn('[player] error', e);
                 Alert.alert('Playback error', JSON.stringify(e?.error ?? e));
               }}
