@@ -38,6 +38,12 @@ class MainApplication : Application(), ReactApplication {
     super.onCreate()
     SoLoader.init(this, false)
     if (BuildConfig.IS_NEW_ARCHITECTURE_ENABLED) {
+      // react_featureflagsjni is compiled as TARGET_OBJECTS merged into the main
+      // React Native shared library. Load it explicitly so SoLoader can resolve
+      // the symbols before DefaultNewArchitectureEntryPoint.load() runs.
+      try {
+        SoLoader.loadLibrary("reactnative")
+      } catch (_: Throwable) {}
       load()
     }
     ApplicationLifecycleDispatcher.onApplicationCreate(this)
