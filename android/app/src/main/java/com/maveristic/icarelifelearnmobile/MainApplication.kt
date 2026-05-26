@@ -38,12 +38,19 @@ class MainApplication : Application(), ReactApplication {
     super.onCreate()
     SoLoader.init(this, false)
     if (BuildConfig.IS_NEW_ARCHITECTURE_ENABLED) {
-      // react_featureflagsjni is compiled as TARGET_OBJECTS merged into the main
-      // React Native shared library. Load it explicitly so SoLoader can resolve
-      // the symbols before DefaultNewArchitectureEntryPoint.load() runs.
+      // RN 0.76+ merges react_featureflagsjni (and others) into libreactnative.so
+      // via jni_lib_merge. The merged sub-library JNI_OnLoads call RegisterNatives,
+      // but only succeed when JNI_OnLoad runs with the APP class loader — which
+      // only happens when the JVM loads the library (System.loadLibrary), not when
+      // SoLoader loads it via native dlopen (DirectApkSoSource).
+      // Loading via System.loadLibrary first ensures the app class loader is active
+      // when jni_lib_merge's RegisterNatives calls run.
       try {
+        System.loadLibrary("reactnative")
+      } catch (_: UnsatisfiedLinkError) {
+        // Fallback for older Android / different install configurations
         SoLoader.loadLibrary("reactnative")
-      } catch (_: Throwable) {}
+      }
       load()
     }
     ApplicationLifecycleDispatcher.onApplicationCreate(this)
