@@ -4,7 +4,7 @@
     "slug": "icare-life-learn-mobile",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
+    "icon": "./assets/images/android-icon-foreground.png",
     "scheme": "icarelifelearnmobile",
     "userInterfaceStyle": "automatic",
     "ios": {
@@ -16,7 +16,7 @@
     },
     "web": {
       "output": "static",
-      "favicon": "./assets/images/favicon.png"
+      "favicon": "./assets/images/android-icon-foreground.png"
     },
     "plugins": [
       "expo-router",
@@ -57,6 +57,7 @@
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
+      "isTablet": true,
       "package": "com.maveristic.icarelifelearnmobile",
       "permissions": [
         "android.permission.INTERNET",
