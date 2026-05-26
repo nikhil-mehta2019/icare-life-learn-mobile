@@ -1,134 +1,252 @@
-import { Image } from 'expo-image';
-import { useEffect, useState } from 'react';
-import { ActivityIndicator, ScrollView, StyleSheet, View } from 'react-native';
-
-import ParallaxScrollView from '@/components/parallax-scroll-view';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { testConnection, fetchEntities } from '../../api/base44Client';
+import { useRouter, type Href } from 'expo-router';
+import { useCallback, useEffect, useState } from 'react';
+import {
+  ActivityIndicator,
+  FlatList,
+  Image,
+  Pressable,
+  RefreshControl,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
+import { fetchCourses, type Course } from '../../api/base44Client';
 
 export default function HomeScreen() {
-  const [connStatus, setConnStatus] = useState<'loading' | 'success' | 'error'>('loading');
-  const [connMessage, setConnMessage] = useState('Connecting to Base44...');
-  const [appData, setAppData] = useState<any>(null);
-  const [entities, setEntities] = useState<any>(null);
+  const router = useRouter();
+  const [courses, setCourses] = useState<Course[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    async function loadData() {
-      try {
-        const conn = await testConnection();
-        if (conn.status === 200 || conn.status === 401) {
-          setConnStatus('success');
-          setConnMessage(`Reached Base44 ✓  (HTTP ${conn.status})`);
-          setAppData(conn.data);
-        }
-
-        // Try fetching common entity names from iCare
-        const attempts = ['Course', 'Student', 'User', 'Enrollment'];
-        for (const name of attempts) {
-          const result = await fetchEntities(name);
-          if (result.status === 200 && Array.isArray(result.data)) {
-            setEntities({ name, records: result.data.slice(0, 3) });
-            break;
-          }
-        }
-      } catch (err: any) {
-        setConnStatus('error');
-        setConnMessage('Error: ' + err.message);
-      }
+  const load = useCallback(async () => {
+    try {
+      setError(null);
+      const data = await fetchCourses({ status: 'published', showInCatalog: true });
+      setCourses(data);
+    } catch (err: any) {
+      setError(err?.message ?? 'Could not load courses');
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
     }
-    loadData();
   }, []);
 
+  useEffect(() => { load(); }, [load]);
+
+  const onRefresh = useCallback(() => {
+    setRefreshing(true);
+    load();
+  }, [load]);
+
+  if (loading) {
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator size="large" color="#1D3D47" />
+        <Text style={styles.muted}>Loading courses…</Text>
+      </View>
+    );
+  }
+
+  if (error) {
+    return (
+      <View style={styles.center}>
+        <Text style={styles.errorText}>Could not load courses</Text>
+        <Text style={styles.muted}>{error}</Text>
+        <Pressable style={styles.retryBtn} onPress={load}>
+          <Text style={styles.retryBtnText}>Retry</Text>
+        </Pressable>
+      </View>
+    );
+  }
+
   return (
-    <ParallaxScrollView
-      headerBackgroundColor={{ light: '#1D3D47', dark: '#1D3D47' }}
-      headerImage={
-        <Image
-          source={require('@/assets/images/partial-react-logo.png')}
-          style={styles.reactLogo}
+    <FlatList
+      data={courses}
+      keyExtractor={(c) => c.id}
+      contentContainerStyle={styles.list}
+      refreshControl={
+        <RefreshControl
+          refreshing={refreshing}
+          onRefresh={onRefresh}
+          tintColor="#1D3D47"
         />
-      }>
-      <ThemedView style={styles.titleContainer}>
-        <ThemedText type="title">iCare Life Learn</ThemedText>
-      </ThemedView>
-
-      <ThemedView style={styles.card}>
-        <ThemedText type="subtitle">Base44 Connection</ThemedText>
-        {connStatus === 'loading' && (
-          <View style={styles.row}>
-            <ActivityIndicator size="small" />
-            <ThemedText style={styles.muted}>{connMessage}</ThemedText>
-          </View>
-        )}
-        {connStatus === 'success' && (
-          <ThemedText style={styles.success}>{connMessage}</ThemedText>
-        )}
-        {connStatus === 'error' && (
-          <ThemedText style={styles.error}>{connMessage}</ThemedText>
-        )}
-        {appData && (
-          <ThemedText style={styles.muted} numberOfLines={4}>
-            {JSON.stringify(appData, null, 2).slice(0, 200)}
-          </ThemedText>
-        )}
-      </ThemedView>
-
-      {entities && (
-        <ThemedView style={styles.card}>
-          <ThemedText type="subtitle">{entities.name} (live from Base44)</ThemedText>
-          {entities.records.map((record: any, i: number) => (
-            <ThemedView key={i} style={styles.record}>
-              <ThemedText style={styles.muted}>
-                {JSON.stringify(record, null, 2).slice(0, 150)}
-              </ThemedText>
-            </ThemedView>
-          ))}
-        </ThemedView>
+      }
+      ListHeaderComponent={
+        <View style={styles.header}>
+          <Text style={styles.headerTitle}>iCare Life Learn</Text>
+          <Text style={styles.headerSub}>
+            {courses.length} {courses.length === 1 ? 'course' : 'courses'} available
+          </Text>
+        </View>
+      }
+      ListEmptyComponent={
+        <View style={styles.center}>
+          <Text style={styles.muted}>No courses available yet.</Text>
+        </View>
+      }
+      renderItem={({ item }) => (
+        <CourseCard
+          course={item}
+          onPress={() => router.push('/(tabs)/explore' as unknown as Href)}
+        />
       )}
-
-      <ThemedView style={styles.card}>
-        <ThemedText type="subtitle">Milestone Status</ThemedText>
-        <ThemedText style={styles.success}>✓ Milestone 1: EAS Build Foundation</ThemedText>
-        <ThemedText style={styles.success}>✓ Milestone 2: Base44 Connection</ThemedText>
-        <ThemedText style={styles.muted}>○ Milestone 3: Android DRM POC</ThemedText>
-      </ThemedView>
-    </ParallaxScrollView>
+    />
   );
 }
 
+function CourseCard({ course, onPress }: { course: Course; onPress: () => void }) {
+  const durationText = course.totalDurationMinutes
+    ? `${Math.round(course.totalDurationMinutes / 60)}h`
+    : null;
+
+  return (
+    <Pressable style={styles.card} onPress={onPress}>
+      {course.thumbnailUrl ? (
+        <Image
+          source={{ uri: course.thumbnailUrl }}
+          style={styles.thumbnail}
+          resizeMode="cover"
+        />
+      ) : (
+        <View style={[styles.thumbnail, styles.thumbnailPlaceholder]}>
+          <Text style={styles.thumbnailPlaceholderText}>
+            {course.title.charAt(0).toUpperCase()}
+          </Text>
+        </View>
+      )}
+      <View style={styles.cardBody}>
+        <Text style={styles.courseTitle} numberOfLines={2}>
+          {course.title}
+        </Text>
+        {course.shortDescription ? (
+          <Text style={styles.courseDesc} numberOfLines={2}>
+            {course.shortDescription}
+          </Text>
+        ) : null}
+        <View style={styles.metaRow}>
+          {course.totalChapters ? (
+            <Text style={styles.metaChip}>{course.totalChapters} chapters</Text>
+          ) : null}
+          {durationText ? (
+            <Text style={styles.metaChip}>{durationText}</Text>
+          ) : null}
+          {course.language && course.language !== 'english' ? (
+            <Text style={styles.metaChip}>{course.language}</Text>
+          ) : null}
+          <AccessBadge course={course} />
+        </View>
+      </View>
+    </Pressable>
+  );
+}
+
+function AccessBadge({ course }: { course: Course }) {
+  if (course.courseAccessType === 'free') {
+    return <Text style={[styles.metaChip, styles.chipFree]}>Free</Text>;
+  }
+  if (course.courseAccessType === 'paid' && course.priceINR) {
+    return <Text style={[styles.metaChip, styles.chipPaid]}>₹{course.priceINR}</Text>;
+  }
+  if (course.courseAccessType === 'subscription') {
+    return <Text style={[styles.metaChip, styles.chipSub]}>Subscription</Text>;
+  }
+  return null;
+}
+
 const styles = StyleSheet.create({
-  titleContainer: {
-    flexDirection: 'row',
+  list: { paddingBottom: 24 },
+  center: {
+    flex: 1,
     alignItems: 'center',
-    gap: 8,
-    marginBottom: 8,
+    justifyContent: 'center',
+    padding: 24,
+    gap: 10,
+    minHeight: 200,
+  },
+  header: {
+    paddingHorizontal: 16,
+    paddingTop: 20,
+    paddingBottom: 12,
+  },
+  headerTitle: {
+    fontSize: 24,
+    fontWeight: '700',
+    color: '#1D3D47',
+  },
+  headerSub: {
+    fontSize: 13,
+    color: '#666',
+    marginTop: 4,
   },
   card: {
-    gap: 8,
-    marginBottom: 16,
-    padding: 12,
-    borderRadius: 8,
-    backgroundColor: 'rgba(255,255,255,0.05)',
-  },
-  record: {
-    padding: 8,
-    borderRadius: 6,
-    backgroundColor: 'rgba(255,255,255,0.03)',
-  },
-  row: {
     flexDirection: 'row',
+    backgroundColor: '#fff',
+    marginHorizontal: 16,
+    marginBottom: 12,
+    borderRadius: 12,
+    overflow: 'hidden',
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.08,
+    shadowRadius: 4,
+  },
+  thumbnail: {
+    width: 100,
+    height: 100,
+  },
+  thumbnailPlaceholder: {
+    backgroundColor: '#1D3D47',
     alignItems: 'center',
-    gap: 8,
+    justifyContent: 'center',
   },
-  muted: { opacity: 0.6, fontSize: 12 },
-  success: { color: '#4CAF50', lineHeight: 22 },
-  error: { color: '#f44336' },
-  reactLogo: {
-    height: 178,
-    width: 290,
-    bottom: 0,
-    left: 0,
-    position: 'absolute',
+  thumbnailPlaceholderText: {
+    fontSize: 36,
+    fontWeight: '700',
+    color: '#fff',
   },
+  cardBody: {
+    flex: 1,
+    padding: 12,
+    gap: 4,
+  },
+  courseTitle: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#1a1a1a',
+    lineHeight: 20,
+  },
+  courseDesc: {
+    fontSize: 12,
+    color: '#555',
+    lineHeight: 17,
+  },
+  metaRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 6,
+  },
+  metaChip: {
+    fontSize: 11,
+    color: '#555',
+    backgroundColor: '#f0f0f0',
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: 4,
+  },
+  chipFree: { backgroundColor: '#e6f4ea', color: '#2e7d32' },
+  chipPaid: { backgroundColor: '#fff3e0', color: '#e65100' },
+  chipSub: { backgroundColor: '#e8eaf6', color: '#3949ab' },
+  muted: { color: '#888', fontSize: 13, textAlign: 'center' },
+  errorText: { fontSize: 15, fontWeight: '600', color: '#c62828' },
+  retryBtn: {
+    backgroundColor: '#1D3D47',
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 8,
+    marginTop: 4,
+  },
+  retryBtnText: { color: '#fff', fontWeight: '600' },
 });
