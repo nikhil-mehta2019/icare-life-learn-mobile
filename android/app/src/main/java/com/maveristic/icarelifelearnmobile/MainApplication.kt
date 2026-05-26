@@ -1,6 +1,7 @@
 package com.maveristic.icarelifelearnmobile
 
 import android.app.Application
+import android.content.Context
 import android.content.res.Configuration
 import com.facebook.react.PackageList
 import com.facebook.react.ReactApplication
@@ -34,23 +35,31 @@ class MainApplication : Application(), ReactApplication {
   override val reactHost: ReactHost
     get() = getDefaultReactHost(applicationContext, reactNativeHost)
 
+  override fun attachBaseContext(base: Context) {
+    super.attachBaseContext(base)
+    // Pre-load libfbjni.so via System.loadLibrary (Java-frame path) before SoLoader.init()
+    // and before any ContentProvider or Expo module can load it via native dlopen.
+    //
+    // Root cause of UnsatisfiedLinkError: some Expo/RN native library loads as an ELF
+    // dependency early in the process (via native dlopen, no Java frame). This transitively
+    // loads libfbjni.so via the ELF linker — also no Java frame. fbjni's JNI_OnLoad caches
+    // the calling thread's class loader at first init; without a Java frame, it caches
+    // null/system class loader. Later, jni_lib_merge inside libreactnative.so's JNI_OnLoad
+    // calls fbjni.FindClass("ReactNativeFeatureFlagsCxxInterop") → returns null →
+    // RegisterNatives is never called → UnsatisfiedLinkError at runtime.
+    //
+    // Fix: load libfbjni.so here, from a Java frame, so fbjni caches the correct app
+    // PathClassLoader. The ELF linker won't call JNI_OnLoad again for already-loaded libs,
+    // so this one-time early load wins and all subsequent FindClass calls work correctly.
+    if (BuildConfig.IS_NEW_ARCHITECTURE_ENABLED) {
+      System.loadLibrary("fbjni")
+    }
+  }
+
   override fun onCreate() {
     super.onCreate()
     SoLoader.init(this, false)
     if (BuildConfig.IS_NEW_ARCHITECTURE_ENABLED) {
-      // RN 0.76+ merges react_featureflagsjni (and others) into libreactnative.so
-      // via jni_lib_merge. The merged sub-library JNI_OnLoads call RegisterNatives,
-      // but only succeed when JNI_OnLoad runs with the APP class loader — which
-      // only happens when the JVM loads the library (System.loadLibrary), not when
-      // SoLoader loads it via native dlopen (DirectApkSoSource).
-      // Loading via System.loadLibrary first ensures the app class loader is active
-      // when jni_lib_merge's RegisterNatives calls run.
-      try {
-        System.loadLibrary("reactnative")
-      } catch (_: UnsatisfiedLinkError) {
-        // Fallback for older Android / different install configurations
-        SoLoader.loadLibrary("reactnative")
-      }
       load()
     }
     ApplicationLifecycleDispatcher.onApplicationCreate(this)
