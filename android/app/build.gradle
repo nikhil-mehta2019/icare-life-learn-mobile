@@ -129,6 +129,17 @@ android {
     androidResources {
         ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:!CVS:!thumbs.db:!picasa.ini:!*~'
     }
+
+    // Build stub .so files for the React Native merged libraries.
+    // RN 0.76+ merges fabricjni, react_featureflagsjni, yoga, etc. into
+    // libreactnative.so via jni_lib_merge, but SoLoader still searches for
+    // them as standalone files. The stubs satisfy that search.
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+            version "3.22.1"
+        }
+    }
 }
 
 // Apply static values from `gradle.properties` to the `android.packagingOptions`
