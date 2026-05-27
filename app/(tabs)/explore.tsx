@@ -149,16 +149,18 @@ const INJECTED_JS = `
   };
 
   function _doFetchTokens(chapterId) {
-    if (!_apiKey || !_baseApi) {
+    var key = _apiKey || window._icareApiKey || null;
+    var api = _baseApi || window._icareBaseApi || null;
+    if (!key || !api) {
       log('warn', 'fetchTokens called before API key was injected — chapterId: ' + chapterId);
       _postMessage({ type: 'CHAPTER_ERROR', chapterId: chapterId,
                      error: 'Bridge not yet initialised with API key' });
       return;
     }
     log('info', 'Fetching tokens for chapter ' + chapterId);
-    var hdrs = { 'Content-Type': 'application/json', 'api_key': _apiKey };
+    var hdrs = { 'Content-Type': 'application/json', 'api_key': key };
 
-    fetch(_baseApi + '/entities/Chapter/' + chapterId,
+    fetch(api + '/entities/Chapter/' + chapterId,
           { headers: hdrs, credentials: 'include' })
       .then(function(r) {
         if (!r.ok) throw new Error('Chapter fetch failed (' + r.status + ')');
@@ -174,7 +176,7 @@ const INJECTED_JS = `
 
         if (!playbackId) throw new Error('Chapter has no Mux playback ID');
 
-        return fetch(_baseApi + '/functions/getMuxToken', {
+        return fetch(api + '/functions/getMuxToken', {
           method: 'POST',
           headers: hdrs,
           credentials: 'include',
