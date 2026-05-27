@@ -31,6 +31,7 @@
  *  • Keep-awake is activated while isPlaying and deactivated on unmount.
  */
 
+import { useIsFocused } from '@react-navigation/native';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { getItemAsync, setItemAsync } from 'expo-secure-store';
@@ -63,9 +64,42 @@ import IcareOfflineDrm, {
 
 type Mode = 'loading' | 'online' | 'offline' | 'error';
 
+// ─── Keep-awake helper ────────────────────────────────────────────────────────
+// Defined outside ChapterPlayerScreen so it can be called unconditionally at
+// the top of the component without violating the Rules of Hooks.
+
+const CHAPTER_PLAYER_KEEP_AWAKE_TAG = 'icare-chapter-player';
+
+function useChapterKeepAwake(shouldKeepAwake: boolean) {
+  useEffect(() => {
+    let released = false;
+    async function applyKeepAwake() {
+      try {
+        if (shouldKeepAwake) {
+          await activateKeepAwakeAsync(CHAPTER_PLAYER_KEEP_AWAKE_TAG);
+        } else {
+          await deactivateKeepAwake(CHAPTER_PLAYER_KEEP_AWAKE_TAG);
+        }
+      } catch (error) {
+        console.warn('[player] keep-awake update failed', error);
+      }
+    }
+    applyKeepAwake();
+    return () => {
+      if (!released) {
+        released = true;
+        deactivateKeepAwake(CHAPTER_PLAYER_KEEP_AWAKE_TAG).catch((error) => {
+          console.warn('[player] keep-awake cleanup failed', error);
+        });
+      }
+    };
+  }, [shouldKeepAwake]);
+}
+
 export default function ChapterPlayerScreen() {
   const { chapterId } = useLocalSearchParams<{ chapterId: string }>();
   const router = useRouter();
+  const isFocused = useIsFocused();
   const videoRef = useRef<VideoRef>(null);
   const { width } = useWindowDimensions();
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -190,14 +224,22 @@ export default function ChapterPlayerScreen() {
 
   // ----- Keep screen awake while player screen is visible ------------------
   //
-  // Activated on mount; also re-activated on every video lifecycle event
-  // (load, ready, fullscreen transitions) because some Android devices drop
-  // the wake lock during the native fullscreen transition.
-  // Only deactivated when the screen unmounts — never on pause.
-  const KEEP_AWAKE_TAG = 'video-player';
-  useEffect(() => {
-    activateKeepAwakeAsync(KEEP_AWAKE_TAG);
-    return () => { deactivateKeepAwake(KEEP_AWAKE_TAG); };
+  // shouldKeepAwake is true whenever this screen is focused AND either:
+  //   • video is actively playing, OR
+  //   • we are in fullscreen, OR
+  //   • tokens have arrived and playback is about to start.
+  // useChapterKeepAwake reacts to this boolean and releases the wake lock on
+  // unmount. Video lifecycle callbacks below also call activateKeepAwakeAsync
+  // directly as a safety net against the OS dropping the lock mid-transition.
+  const shouldKeepAwake =
+    isFocused && (isPlaying || isFullscreen || mode === 'online' || mode === 'offline');
+  useChapterKeepAwake(shouldKeepAwake);
+
+  // ----- handlePlaybackRateChange (useCallback must be before early returns) --
+  // onPlaybackRateChange is the correct v5.2.1 callback for play/pause state.
+  // onPlaybackStateChanged does not exist in v5 — it was silently ignored.
+  const handlePlaybackRateChange = useCallback(({ playbackRate }: { playbackRate: number }) => {
+    setIsPlaying(playbackRate > 0);
   }, []);
 
   // ----- Build Video source -------------------------------------------------
@@ -372,12 +414,6 @@ export default function ChapterPlayerScreen() {
       }
     });
 
-  // onPlaybackRateChange is the correct v5.2.1 callback for play/pause state.
-  // onPlaybackStateChanged does not exist in v5 — it was silently ignored.
-  const handlePlaybackRateChange = useCallback(({ playbackRate }: { playbackRate: number }) => {
-    setIsPlaying(playbackRate > 0);
-  }, []);
-
   const playerHeight = (width / 16) * 9;
 
   // ----- Render: player -----------------------------------------------------
@@ -393,25 +429,25 @@ export default function ChapterPlayerScreen() {
             resizeMode="contain"
             onLoad={(data) => {
               // Re-activate in case the wake lock was dropped during initial load.
-              activateKeepAwakeAsync(KEEP_AWAKE_TAG);
+              activateKeepAwakeAsync(CHAPTER_PLAYER_KEEP_AWAKE_TAG);
               handleVideoLoad(data);
             }}
             onReadyForDisplay={() => {
-              activateKeepAwakeAsync(KEEP_AWAKE_TAG);
+              activateKeepAwakeAsync(CHAPTER_PLAYER_KEEP_AWAKE_TAG);
             }}
             onFullscreenPlayerWillPresent={() => {
-              activateKeepAwakeAsync(KEEP_AWAKE_TAG);
+              activateKeepAwakeAsync(CHAPTER_PLAYER_KEEP_AWAKE_TAG);
             }}
             onFullscreenPlayerDidPresent={() => {
-              activateKeepAwakeAsync(KEEP_AWAKE_TAG);
+              activateKeepAwakeAsync(CHAPTER_PLAYER_KEEP_AWAKE_TAG);
             }}
             onFullscreenPlayerWillDismiss={() => {
-              activateKeepAwakeAsync(KEEP_AWAKE_TAG);
+              activateKeepAwakeAsync(CHAPTER_PLAYER_KEEP_AWAKE_TAG);
             }}
             onFullscreenPlayerDidDismiss={() => {
               console.log('[player] Fullscreen dismissed');
               setIsFullscreen(false);
-              activateKeepAwakeAsync(KEEP_AWAKE_TAG);
+              activateKeepAwakeAsync(CHAPTER_PLAYER_KEEP_AWAKE_TAG);
             }}
             onPlaybackRateChange={handlePlaybackRateChange}
             onEnd={() => {
