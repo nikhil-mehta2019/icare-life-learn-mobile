@@ -34,7 +34,7 @@
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { getItemAsync, setItemAsync } from 'expo-secure-store';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -73,6 +73,9 @@ export default function ChapterPlayerScreen() {
   const [mode, setMode] = useState<Mode>('loading');
   const [isPlaying, setIsPlaying] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  // Peak scale tracked across the pinch gesture — Android MediaController
+  // intercepts touches so onEnd scale is often 1.0; we track the max instead.
+  const peakScale = useRef(1);
   const [audioToastVisible, setAudioToastVisible] = useState(false);
   const audioToastOpacity = useRef(new Animated.Value(0)).current;
   const [chapter, setChapter] = useState<Chapter | null>(null);
@@ -330,61 +333,105 @@ export default function ChapterPlayerScreen() {
   }
 
   // ----- Pinch-to-fullscreen gesture ----------------------------------------
+  //
+  // Two fixes vs the previous implementation:
+  //
+  // 1. Track PEAK scale via onUpdate, not final scale via onEnd.
+  //    On Android, the native MediaController intercepts touch events, so by
+  //    the time fingers lift the reported scale is often back near 1.0.
+  //    Tracking the maximum scale seen during the gesture is reliable.
+  //
+  // 2. The GestureDetector is placed on a transparent OVERLAY View that sits
+  //    ABOVE the Video component (not wrapping it).  This prevents the Video's
+  //    native MediaController from swallowing pinch pointer events before RNGH
+  //    can read them, while still allowing single taps to reach the controls.
+  //
+  // 3. Use only the imperative ref methods (presentFullscreenPlayer /
+  //    dismissFullscreenPlayer) — NOT the fullscreen prop — to avoid double-
+  //    triggering the native fullscreen on some Android RNVideo 5.x builds.
+
   const pinchGesture = Gesture.Pinch()
     .runOnJS(true)
-    .onEnd((e) => {
-      if (e.scale > 1.2 && !isFullscreen) {
+    .onStart(() => {
+      peakScale.current = 1;
+    })
+    .onUpdate((e) => {
+      if (e.scale > peakScale.current) peakScale.current = e.scale;
+    })
+    .onEnd(() => {
+      const peak = peakScale.current;
+      peakScale.current = 1;
+      if (peak > 1.1 && !isFullscreen) {
+        console.log(`[player] Pinch-out detected (peak ${peak.toFixed(2)}) — entering fullscreen`);
         setIsFullscreen(true);
         videoRef.current?.presentFullscreenPlayer();
-      } else if (e.scale < 0.8 && isFullscreen) {
+      } else if (peak < 0.9 && isFullscreen) {
+        console.log(`[player] Pinch-in detected (peak ${peak.toFixed(2)}) — exiting fullscreen`);
         setIsFullscreen(false);
         videoRef.current?.dismissFullscreenPlayer();
       }
     });
+
+  // onPlaybackRateChange is the correct v5.2.1 callback for play/pause state.
+  // onPlaybackStateChanged does not exist in v5 — it was silently ignored.
+  const handlePlaybackRateChange = useCallback(({ playbackRate }: { playbackRate: number }) => {
+    setIsPlaying(playbackRate > 0);
+  }, []);
 
   const playerHeight = (width / 16) * 9;
 
   // ----- Render: player -----------------------------------------------------
   return (
     <GestureHandlerRootView style={styles.container}>
-      <GestureDetector gesture={pinchGesture}>
-        <View style={[styles.playerWrap, { width, height: playerHeight }]}>
-          {source && (
-            <Video
-              ref={videoRef}
-              source={source}
-              drm={drm}
-              controls
-              resizeMode="contain"
-              fullscreen={isFullscreen}
-              onFullscreenPlayerDidDismiss={() => setIsFullscreen(false)}
-              onLoad={handleVideoLoad}
-              onPlaybackStateChanged={({ isPlaying: playing }) => setIsPlaying(playing)}
-              onEnd={() => setIsPlaying(false)}
-              style={StyleSheet.absoluteFill}
-              onError={(e: any) => {
-                setIsPlaying(false);
-                const detail = JSON.stringify(e?.error ?? e);
-                console.error(`[player] Playback error for chapter ${chapterId}: ${detail}`);
-                Alert.alert('Playback error', detail);
-              }}
-            />
-          )}
-          {audioToastVisible && (
-            <Animated.View style={[styles.audioToast, { opacity: audioToastOpacity }]}>
-              <Text style={styles.audioToastText}>
-                Multiple audio languages available. Select your preferred language from player settings.
-              </Text>
-              <Pressable onPress={() => {
-                audioToastOpacity.setValue(0);
-                setAudioToastVisible(false);
-              }}>
-                <Text style={styles.audioToastDismiss}>✕</Text>
-              </Pressable>
-            </Animated.View>
-          )}
-        </View>
-      </GestureDetector>
+      <View style={[styles.playerWrap, { width, height: playerHeight }]}>
+        {source && (
+          <Video
+            ref={videoRef}
+            source={source}
+            drm={drm}
+            controls
+            resizeMode="contain"
+            onFullscreenPlayerDidDismiss={() => {
+              console.log('[player] Fullscreen dismissed');
+              setIsFullscreen(false);
+            }}
+            onLoad={handleVideoLoad}
+            onPlaybackRateChange={handlePlaybackRateChange}
+            onEnd={() => {
+              console.log('[player] Playback ended');
+              setIsPlaying(false);
+            }}
+            style={StyleSheet.absoluteFill}
+            onError={(e: any) => {
+              setIsPlaying(false);
+              const detail = JSON.stringify(e?.error ?? e);
+              console.error(`[player] Playback error for chapter ${chapterId}: ${detail}`);
+              Alert.alert('Playback error', detail);
+            }}
+          />
+        )}
+
+        {/* Transparent pinch-capture overlay — above Video so RNGH receives
+            pinch pointers before the native MediaController can swallow them.
+            pointerEvents="box-none" lets single taps pass through to controls. */}
+        <GestureDetector gesture={pinchGesture}>
+          <View style={[StyleSheet.absoluteFill, styles.pinchOverlay]} pointerEvents="box-none" />
+        </GestureDetector>
+
+        {audioToastVisible && (
+          <Animated.View style={[styles.audioToast, { opacity: audioToastOpacity }]}>
+            <Text style={styles.audioToastText}>
+              Multiple audio languages available. Select your preferred language from player settings.
+            </Text>
+            <Pressable onPress={() => {
+              audioToastOpacity.setValue(0);
+              setAudioToastVisible(false);
+            }}>
+              <Text style={styles.audioToastDismiss}>✕</Text>
+            </Pressable>
+          </Animated.View>
+        )}
+      </View>
 
       <View style={styles.metaRow}>
         <Text style={styles.title} numberOfLines={2}>
@@ -462,6 +509,9 @@ function DownloadControls({
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
   playerWrap: { backgroundColor: '#000', position: 'relative' },
+  // Transparent view that sits above the Video to capture pinch gestures
+  // before the native MediaController can intercept them.
+  pinchOverlay: { backgroundColor: 'transparent' },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 16, gap: 8 },
   metaRow: { flexDirection: 'row', alignItems: 'center', padding: 12, gap: 12 },
   title: { color: '#fff', fontSize: 16, fontWeight: '600', flex: 1 },
