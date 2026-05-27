@@ -190,15 +190,14 @@ export default function ChapterPlayerScreen() {
 
   // ----- Keep screen awake while player screen is visible ------------------
   //
-  // Activated on mount rather than gated on isPlaying.  onPlaybackRateChange
-  // can fire inconsistently on some Android/RNVideo builds, leaving isPlaying
-  // stuck at false even when video is running — which would let the screen lock
-  // mid-playback.  The player screen only exists while the user is watching, so
-  // keeping the screen awake for its entire lifetime is the correct behaviour.
+  // Activated on mount; also re-activated on every video lifecycle event
+  // (load, ready, fullscreen transitions) because some Android devices drop
+  // the wake lock during the native fullscreen transition.
+  // Only deactivated when the screen unmounts — never on pause.
+  const KEEP_AWAKE_TAG = 'video-player';
   useEffect(() => {
-    const TAG = 'video-player';
-    activateKeepAwakeAsync(TAG);
-    return () => { deactivateKeepAwake(TAG); };
+    activateKeepAwakeAsync(KEEP_AWAKE_TAG);
+    return () => { deactivateKeepAwake(KEEP_AWAKE_TAG); };
   }, []);
 
   // ----- Build Video source -------------------------------------------------
@@ -392,11 +391,28 @@ export default function ChapterPlayerScreen() {
             drm={drm}
             controls
             resizeMode="contain"
+            onLoad={(data) => {
+              // Re-activate in case the wake lock was dropped during initial load.
+              activateKeepAwakeAsync(KEEP_AWAKE_TAG);
+              handleVideoLoad(data);
+            }}
+            onReadyForDisplay={() => {
+              activateKeepAwakeAsync(KEEP_AWAKE_TAG);
+            }}
+            onFullscreenPlayerWillPresent={() => {
+              activateKeepAwakeAsync(KEEP_AWAKE_TAG);
+            }}
+            onFullscreenPlayerDidPresent={() => {
+              activateKeepAwakeAsync(KEEP_AWAKE_TAG);
+            }}
+            onFullscreenPlayerWillDismiss={() => {
+              activateKeepAwakeAsync(KEEP_AWAKE_TAG);
+            }}
             onFullscreenPlayerDidDismiss={() => {
               console.log('[player] Fullscreen dismissed');
               setIsFullscreen(false);
+              activateKeepAwakeAsync(KEEP_AWAKE_TAG);
             }}
-            onLoad={handleVideoLoad}
             onPlaybackRateChange={handlePlaybackRateChange}
             onEnd={() => {
               console.log('[player] Playback ended');

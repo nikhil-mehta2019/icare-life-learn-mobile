@@ -507,7 +507,7 @@ export default function ExploreScreen() {
    *
    * BRIDGE_READY              — diagnostic signal, credentials already embedded
    * OPEN_CHAPTER_WITH_TOKENS  — cache tokens FIRST, then push player screen
-   * OPEN_CHAPTER_WITH_ERROR   — cache error FIRST, then push player screen
+   * OPEN_CHAPTER_WITH_ERROR   — log only, stay on WebView (V1 fallback)
    * OPEN_CHAPTER              — legacy fallback: navigate without pre-cached data
    * CHAPTER_TOKENS            — deliver tokens for download / delete-download flows
    * CHAPTER_ERROR             — unblock player for download / delete-download flows
@@ -553,12 +553,15 @@ export default function ExploreScreen() {
             console.warn('[explore] OPEN_CHAPTER_WITH_ERROR received without chapterId — ignored');
             break;
           }
-          console.warn(`[explore] OPEN_CHAPTER_WITH_ERROR for chapter ${chapterId}: ${msg.error}`);
-          deliverPlayerError(chapterId, String(msg.error ?? 'Unknown error from WebView bridge'));
-          router.push({
-            pathname: '/player/[chapterId]',
-            params: { chapterId },
-          } as unknown as Href);
+          // V1 stability: token bridge failed (Unauthorized / timeout / network).
+          // Do NOT navigate to the native player error screen.
+          // Do NOT call deliverPlayerError — no native player is waiting.
+          // Base44 WebView playback is the confirmed working fallback: leave
+          // the user on the chapter page so the video continues playing there.
+          console.warn(
+            `[explore] Native token bridge failed for chapter ${chapterId}; ` +
+            `staying on WebView playback fallback: ${msg.error}`
+          );
           break;
 
         case 'OPEN_CHAPTER':
