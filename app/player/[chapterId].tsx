@@ -46,9 +46,11 @@ import {
   ActivityIndicator,
   Alert,
   Animated,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
+  UIManager,
   useWindowDimensions,
   View,
 } from 'react-native';
@@ -68,7 +70,40 @@ import IcareOfflineDrm, {
   type OfflinePlaybackSource,
 } from '../../modules/icare-offline-drm';
 
-type Mode = 'loading' | 'online' | 'offline' | 'error';
+type Mode = 'loading' | 'online' | 'offline' | 'error' | 'webview-fallback';
+
+// ─── Native video availability guard ─────────────────────────────────────────
+//
+// react-native-video 5.2.1 was built for the Old Architecture. On React Native
+// 0.76+ with New Architecture / Bridgeless enabled (IS_NEW_ARCH=true), the old
+// ViewManager registry (UIManager) is null, causing:
+//   TypeError: Cannot read property 'getViewManagerConfig' of null
+// at the moment <Video> is rendered.
+//
+// We detect this at module load time and cache the result so every render is
+// zero-cost. On iOS this always returns true (not affected by the same bridge).
+// On Android we guard defensively: if UIManager or its method is unavailable,
+// native video is considered unsafe.
+
+function isNativeVideoAvailable(): boolean {
+  try {
+    if (Platform.OS !== 'android') return true;
+    if (!UIManager || typeof UIManager.getViewManagerConfig !== 'function') {
+      return false;
+    }
+    const config =
+      UIManager.getViewManagerConfig('RCTVideo') ??
+      UIManager.getViewManagerConfig('Video');
+    return !!config;
+  } catch (e) {
+    console.warn('[player] native video availability check failed', e);
+    return false;
+  }
+}
+
+// Evaluated once when the module loads — no per-render cost.
+const NATIVE_VIDEO_AVAILABLE = isNativeVideoAvailable();
+console.log(`[player] native video available: ${NATIVE_VIDEO_AVAILABLE} (platform: ${Platform.OS})`);
 
 // ─── Keep-awake hook (module-level) ──────────────────────────────────────────
 // Defined outside any component so it is always called unconditionally.
@@ -347,7 +382,18 @@ export default function ChapterPlayerScreen() {
           );
           setChapter(result.data.chapter);
           setTokens(result.data.tokens);
-          setMode('online');
+          if (!NATIVE_VIDEO_AVAILABLE) {
+            // react-native-video 5.x is Old Architecture only; on RN 0.76+
+            // with New Architecture / Bridgeless, rendering <Video> crashes.
+            // Route to WebView fallback instead — user stays in Base44 player.
+            console.log(
+              '[player] native video unavailable on Android — using WebView fallback',
+            );
+            console.log('[player] android playback mode: webview-fallback');
+            setMode('webview-fallback');
+          } else {
+            setMode('online');
+          }
           return;
         }
 
@@ -521,6 +567,20 @@ export default function ChapterPlayerScreen() {
     setMode('online');
   }, [chapter, chapterId]);
 
+  // ── webview-fallback navigation ── (hook #17)
+  // When native Video is unavailable on this device (react-native-video 5.x is
+  // Old Architecture only; RN 0.76+ forces New Architecture / Bridgeless which
+  // nulls the ViewManager registry), navigate back immediately so the Base44
+  // WebView player handles playback instead of crashing.
+  // Short delay (100 ms) lets React commit the render before navigation fires.
+  useEffect(() => {
+    if (mode !== 'webview-fallback') return;
+    const timer = setTimeout(() => {
+      router.back();
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [mode, router]);
+
   // ── ALL HOOKS ABOVE THIS LINE ─────────────────────────────────────────────
   // Render state log — confirms hook-order-v2 is active and shows current state.
   console.log('[player] render state', {
@@ -536,6 +596,19 @@ export default function ChapterPlayerScreen() {
       <View style={styles.center}>
         <ActivityIndicator size="large" />
         <Text style={styles.muted}>Loading chapter…</Text>
+      </View>
+    );
+  }
+
+  // ── webview-fallback ──
+  // react-native-video 5.x is not compatible with New Architecture (RN 0.76+).
+  // Show a brief spinner while useEffect navigates back to the Base44 WebView
+  // player (100 ms). User sees this for only one frame on Android New Arch.
+  if (mode === 'webview-fallback') {
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator size="large" />
+        <Text style={styles.muted}>Opening in browser…</Text>
       </View>
     );
   }
