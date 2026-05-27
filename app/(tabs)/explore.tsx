@@ -10,10 +10,14 @@
  *   Base44 uses client-side routing (pushState / replaceState).  The injected
  *   JS wraps those history methods and fires checkUrl() after each navigation.
  *   When a chapter URL is detected:
- *     1. postMessage OPEN_CHAPTER  → native opens player in loading state
- *     2. postMessage REQUEST_TOKENS internally to self → injected JS fetches
- *        chapter metadata + Mux tokens using the WebView's authenticated
- *        session cookies, then posts CHAPTER_TOKENS (or CHAPTER_ERROR).
+ *     1. Injected JS fetches Chapter entity (api_key sufficient).
+ *     2. Base44's SPA renders its own chapter player and calls getMuxToken
+ *        with its full auth headers (session token from localStorage).
+ *     3. A monkey-patched fetch interceptor captures that getMuxToken response.
+ *     4. Injected JS posts OPEN_CHAPTER_WITH_TOKENS (tokens + chapter) →
+ *        native caches data, then pushes the player screen.
+ *   Note: we do NOT call getMuxToken ourselves in this path — our direct call
+ *   returns 401 because we cannot read Base44's localStorage session token.
  *
  *  Token re-request (download / delete-download):
  *   The native player posts REQUEST_TOKENS to the WebView when it needs fresh
@@ -171,18 +175,129 @@ const INJECTED_JS = `
     });
   }
 
-  // __icareFetchTokens is still exposed so the native layer can trigger a
-  // fresh token fetch for download / delete-download without a navigation event.
+  // ── getMuxToken fetch interceptor ─────────────────────────────────────────
+  //
+  // Root cause of "Unauthorized": getMuxToken requires the user's session
+  // token, which Base44 stores in localStorage and sends as a custom header.
+  // Our injected JS fetch only sends the api_key + cookies — it does NOT
+  // include the localStorage token, so getMuxToken returns 401.
+  //
+  // Solution: instead of calling getMuxToken ourselves (which would fail),
+  // we intercept Base44's OWN successful getMuxToken call and forward those
+  // tokens to the native player.  Base44's code has proper auth; we just
+  // piggyback on its result.
+  //
+  // _capturedAuthHeaders : auth headers from Base44's getMuxToken calls,
+  //   saved for the download/refresh flow (where Base44 won't call getMuxToken
+  //   itself — we must call it directly and need those headers).
+  // _interceptedTokenBuffer : tokens captured before a waiter was registered.
+  // _tokenWaiters : per-playbackId arrays of {resolve, reject, timer}.
+
+  var _capturedAuthHeaders = {};
+  var _interceptedTokenBuffer = {};
+  var _tokenWaiters = {};
+
+  (function _installFetchInterceptor() {
+    var _orig = window.fetch;
+    window.fetch = function(url, opts) {
+      var result = _orig.apply(this, arguments);
+
+      if (typeof url === 'string' && url.indexOf('/functions/getMuxToken') !== -1) {
+
+        // Save any non-trivial request headers for future direct calls.
+        if (opts && opts.headers && !_capturedAuthHeaders._ready) {
+          try {
+            var h = opts.headers;
+            if (typeof h.forEach === 'function') {
+              var tmp = {};
+              h.forEach(function(v, k) { tmp[k] = v; });
+              h = tmp;
+            }
+            Object.keys(h).forEach(function(k) {
+              if (k.toLowerCase() !== 'content-type') {
+                _capturedAuthHeaders[k] = h[k];
+              }
+            });
+            _capturedAuthHeaders._ready = true;
+            log('info', 'Captured auth headers from Base44 getMuxToken call');
+          } catch (e) {
+            log('warn', 'Auth header capture error: ' + e);
+          }
+        }
+
+        // Read the response (via clone) and deliver to waiters or buffer it.
+        result.then(function(res) {
+          if (!res.ok) return;
+          res.clone().json().then(function(tokens) {
+            try {
+              var body = (opts && typeof opts.body === 'string')
+                ? JSON.parse(opts.body) : {};
+              var pid = body.playbackId;
+              if (!pid) return;
+              var waiters = _tokenWaiters[pid];
+              if (waiters && waiters.length) {
+                var arr = waiters.splice(0);
+                delete _tokenWaiters[pid];
+                arr.forEach(function(w) { clearTimeout(w.timer); w.resolve(tokens); });
+                log('info', 'Delivered intercepted tokens to ' + arr.length + ' waiter(s)');
+              } else {
+                _interceptedTokenBuffer[pid] = tokens;
+                log('info', 'Buffered intercepted tokens for playbackId ' + pid);
+              }
+            } catch (e) {
+              log('warn', 'Token intercept delivery error: ' + e);
+            }
+          }).catch(function() {});
+        }).catch(function() {});
+      }
+
+      return result;
+    };
+    log('info', 'Fetch interceptor installed');
+  })();
+
+  // Wait for Base44's getMuxToken response for a given playbackId.
+  // Fast-path: already buffered (Base44 called getMuxToken before us).
+  // Slow-path: register a waiter; resolves when the intercept fires.
+  function _waitForInterceptedTokens(playbackId) {
+    if (_interceptedTokenBuffer[playbackId]) {
+      var t = _interceptedTokenBuffer[playbackId];
+      delete _interceptedTokenBuffer[playbackId];
+      log('info', 'Using buffered tokens for playbackId ' + playbackId);
+      return Promise.resolve(t);
+    }
+    return new Promise(function(resolve, reject) {
+      var timer = setTimeout(function() {
+        var arr = _tokenWaiters[playbackId];
+        if (arr) {
+          for (var i = 0; i < arr.length; i++) {
+            if (arr[i].timer === timer) { arr.splice(i, 1); break; }
+          }
+          if (arr.length === 0) delete _tokenWaiters[playbackId];
+        }
+        reject(new Error('Timed out waiting for getMuxToken response'));
+      }, FETCH_TIMEOUT_MS);
+      if (!_tokenWaiters[playbackId]) _tokenWaiters[playbackId] = [];
+      _tokenWaiters[playbackId].push({ resolve: resolve, reject: reject, timer: timer });
+      log('info', 'Waiting to intercept getMuxToken for playbackId ' + playbackId);
+    });
+  }
+
+  // __icareFetchTokens: called by native for download / delete-download flows.
+  // Base44 SPA is not navigating, so we call getMuxToken directly using the
+  // auth headers captured from Base44's previous successful calls.
   window.__icareFetchTokens = function(chapterId) {
-    _doFetchTokens(chapterId);
+    _doFetchTokens(chapterId, false);
   };
 
   function _doFetchTokens(chapterId, navigateAfter) {
     var key = _apiKey;
     var api = _baseApi;
-    log('info', 'Fetching tokens for chapter ' + chapterId);
+    log('info', 'Fetching tokens for chapter ' + chapterId
+        + (navigateAfter ? ' (navigation — will intercept Base44 getMuxToken)' : ' (direct call)'));
     var hdrs = { 'Content-Type': 'application/json', 'api_key': key };
 
+    // Step 1: Fetch chapter metadata. api_key alone is sufficient for entity reads.
     fetchJsonWithTimeout('Chapter fetch', api + '/entities/Chapter/' + chapterId,
           { headers: hdrs, credentials: 'include' }, FETCH_TIMEOUT_MS)
       .then(function(r) {
@@ -199,9 +314,30 @@ const INJECTED_JS = `
 
         if (!playbackId) throw new Error('Chapter has no Mux playback ID');
 
+        // Step 2a — Navigation flow: intercept Base44's own getMuxToken call.
+        // Base44 renders its chapter player and calls getMuxToken with its full
+        // auth headers. We capture that response instead of making our own call
+        // (which would fail 401 — we don't have Base44's localStorage session token).
+        if (navigateAfter) {
+          return _waitForInterceptedTokens(playbackId).then(function(tokens) {
+            log('info', 'Intercepted tokens ready for chapter ' + chapterId);
+            _postMessage({ type: 'OPEN_CHAPTER_WITH_TOKENS', chapterId: chapterId,
+                           chapter: chapter, tokens: tokens });
+          });
+        }
+
+        // Step 2b — Download / refresh flow: no Base44 navigation in progress.
+        // We must call getMuxToken directly. Use captured auth headers from a
+        // previous successful Base44 call if available.
+        var muxHdrs = Object.assign({}, hdrs);
+        if (_capturedAuthHeaders._ready) {
+          Object.keys(_capturedAuthHeaders).forEach(function(k) {
+            if (k !== '_ready') muxHdrs[k] = _capturedAuthHeaders[k];
+          });
+        }
         return fetchJsonWithTimeout('getMuxToken', api + '/functions/getMuxToken', {
           method: 'POST',
-          headers: hdrs,
+          headers: muxHdrs,
           credentials: 'include',
           body: JSON.stringify({ playbackId: playbackId }),
         }, FETCH_TIMEOUT_MS).then(function(r) {
@@ -211,22 +347,15 @@ const INJECTED_JS = `
             });
           }
           return r.json().then(function(tokens) {
-            log('info', 'Tokens fetched OK for chapter ' + chapterId);
-            if (navigateAfter) {
-              log('info', 'Posting OPEN_CHAPTER_WITH_TOKENS for chapter ' + chapterId);
-              _postMessage({ type: 'OPEN_CHAPTER_WITH_TOKENS', chapterId: chapterId,
-                             chapter: chapter, tokens: tokens });
-            } else {
-              _postMessage({ type: 'CHAPTER_TOKENS', chapterId: chapterId,
-                             chapter: chapter, tokens: tokens });
-            }
+            log('info', 'Direct getMuxToken OK for chapter ' + chapterId);
+            _postMessage({ type: 'CHAPTER_TOKENS', chapterId: chapterId,
+                           chapter: chapter, tokens: tokens });
           });
         });
       })
       .catch(function(err) {
         log('error', 'Token fetch failed for chapter ' + chapterId + ': ' + String(err));
         if (navigateAfter) {
-          log('info', 'Posting OPEN_CHAPTER_WITH_ERROR for chapter ' + chapterId);
           _postMessage({ type: 'OPEN_CHAPTER_WITH_ERROR', chapterId: chapterId,
                          error: String(err) });
         } else {
