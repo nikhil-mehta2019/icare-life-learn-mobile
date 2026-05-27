@@ -6,8 +6,6 @@ import type { ShouldStartLoadRequest } from 'react-native-webview/lib/WebViewTyp
 import { deliverPlayerData } from '../../api/playerCache';
 
 const BASE44_URL = 'https://icare-life-learn.base44.app';
-const API_KEY = '6af260f41e2140b9950788621360c5cf';
-const BASE_API = 'https://icare-life-learn.base44.app/api';
 
 /**
  * Actual Base44 chapter player URL (confirmed from live app inspection):
@@ -56,8 +54,8 @@ const INJECTED_JS = `
     if (window.__icareNativeBridgeInstalled) return;
     window.__icareNativeBridgeInstalled = true;
 
-    var _API_KEY  = '${API_KEY}';
-    var _BASE_API = '${BASE_API}';
+    var _API_KEY  = '6af260f41e2140b9950788621360c5cf';
+    var _BASE_API = 'https://icare-life-learn.base44.app/api';
 
     // -- 1. Explicit bridge -------------------------------------------------------
     window.icareNative = {
