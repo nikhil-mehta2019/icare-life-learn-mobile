@@ -7,23 +7,22 @@ import type { ShouldStartLoadRequest } from 'react-native-webview/lib/WebViewTyp
 const BASE44_URL = 'https://icare-life-learn.base44.app';
 
 /**
- * URL patterns that identify a chapter player page.
+ * Actual Base44 chapter player URL (confirmed from live app inspection):
  *
- * Used in two places:
- *  1. onShouldStartLoadWithRequest  — for hard navigations (page reloads, links)
- *  2. Injected JS                   — for SPA client-side routing (pushState etc.)
+ *   /chapter/{courseId}/{chapterId}
  *
- * Base44 chapter player URL shapes we handle:
- *   /chapter/:id
- *   /student/chapter/:id
- *   /chapter-player?id=:id   (Base44 default page-name → URL)
- *   /ChapterPlayer?id=:id
- *   #/chapter/:id            (hash-router variant)
- *   #/ChapterPlayer?id=:id
+ * The chapterId is the SECOND path segment — that is what we must capture
+ * and pass to the native player.  Previous patterns matched the first segment
+ * (courseId) by mistake.
+ *
+ * Additional fallback patterns are kept in case the web app ever uses
+ * alternative routes for deep-links or direct entry.
  */
 const CHAPTER_PATH_PATTERNS: RegExp[] = [
-  /\/chapter\/([A-Za-z0-9_-]{8,})\b/,
-  /\/student\/chapter\/([A-Za-z0-9_-]{8,})\b/,
+  // PRIMARY: /chapter/{courseId}/{chapterId}  — capture second segment
+  /\/chapter\/[A-Za-z0-9_-]{8,}\/([A-Za-z0-9_-]{8,})\b/,
+  // Fallbacks
+  /\/student\/chapter\/[A-Za-z0-9_-]{8,}\/([A-Za-z0-9_-]{8,})\b/,
   /[/#]chapter-player[/?](?:.*[?&])?id=([A-Za-z0-9_-]{8,})/i,
   /[/#]ChapterPlayer[/?](?:.*[?&])?id=([A-Za-z0-9_-]{8,})/i,
   /\/ChapterPlayer\?(?:.*&)?id=([A-Za-z0-9_-]{8,})/,
@@ -41,20 +40,15 @@ function extractChapterId(url: string): string | null {
 /**
  * Injected into the WebView before content loads.
  *
- * Two responsibilities:
+ * 1. Installs window.icareNative.openChapter(id) so the Base44 web app can
+ *    explicitly request native playback.
  *
- *  1. window.icareNative.openChapter(id)
- *     Explicit bridge: the Base44 web app can call this to hand off to the
- *     native player directly (no URL matching required).
- *
- *  2. SPA navigation monitoring
- *     Patches history.pushState / replaceState and listens for popstate /
- *     hashchange so we are notified of every client-side URL change.
- *     When the new URL matches a chapter-player pattern we post
- *     { type: 'OPEN_CHAPTER', chapterId } to the native layer, which then
- *     opens the full native player (pinch-zoom, DRM, offline download, etc.)
- *     and simultaneously navigates the WebView back one step so the user
- *     returns to the chapter list when they press Back in the native player.
+ * 2. Monitors SPA client-side navigation (pushState / replaceState /
+ *    popstate / hashchange).  When the URL matches the chapter player pattern
+ *    the chapterId is extracted and posted to the native layer, which opens
+ *    the full native player (DRM, pinch-zoom, offline download, etc.).
+ *    The WebView also steps back via history.back() so the user returns to
+ *    the chapter list when they press Back in the native player.
  */
 const INJECTED_JS = `
   (function() {
@@ -72,9 +66,12 @@ const INJECTED_JS = `
 
     // ── 2. SPA navigation monitoring ─────────────────────────────────────────
     function getChapterIdFromUrl(url) {
+      // PRIMARY: /chapter/{courseId}/{chapterId} — capture SECOND segment
+      var primary = url.match(/\\/chapter\\/[A-Za-z0-9_-]{8,}\\/([A-Za-z0-9_-]{8,})(?:\\/|\\?|$)/);
+      if (primary) return primary[1];
+      // Fallbacks
       var patterns = [
-        /\\/chapter\\/([A-Za-z0-9_-]{8,})/,
-        /\\/student\\/chapter\\/([A-Za-z0-9_-]{8,})/,
+        /\\/student\\/chapter\\/[A-Za-z0-9_-]{8,}\\/([A-Za-z0-9_-]{8,})/,
         /[\\/#]chapter-player[\\/?](?:.*[?&])?id=([A-Za-z0-9_-]{8,})/i,
         /[\\/#]ChapterPlayer[\\/?](?:.*[?&])?id=([A-Za-z0-9_-]{8,})/i,
         /\\/ChapterPlayer\\?(?:.*&)?id=([A-Za-z0-9_-]{8,})/,
@@ -94,17 +91,15 @@ const INJECTED_JS = `
       if (!chapterId || chapterId === _lastFiredId) return;
       _lastFiredId = chapterId;
 
-      // Post to native layer — native will open the player screen
+      // Tell native layer to open the player
       window.ReactNativeWebView && window.ReactNativeWebView.postMessage(
         JSON.stringify({ type: 'OPEN_CHAPTER', chapterId: chapterId })
       );
 
-      // Navigate the WebView back so that when the user returns from the
-      // native player they land on the chapter list, not the web player page.
-      // Small delay lets the SPA finish its render cycle first.
+      // Step the WebView back so the user returns to the chapter list
+      // (not the web player page) when pressing Back in the native player.
       setTimeout(function() {
         if (typeof history.back === 'function') history.back();
-        // Reset so the same chapter can be re-opened later
         setTimeout(function() { _lastFiredId = null; }, 1500);
       }, 250);
     }
@@ -123,7 +118,7 @@ const INJECTED_JS = `
     window.addEventListener('popstate',   function() { setTimeout(checkUrl, 150); });
     window.addEventListener('hashchange', function() { setTimeout(checkUrl, 150); });
 
-    // Check once after initial page paint
+    // Initial check after page paint
     setTimeout(checkUrl, 800);
     true;
   })();
@@ -133,10 +128,7 @@ export default function ExploreScreen() {
   const router = useRouter();
   const webRef = useRef<WebView>(null);
 
-  /**
-   * Hard navigations only (initial load, external links, redirects).
-   * SPA routing is handled via the injected JS + onMessage.
-   */
+  /** Hard navigations (initial load, external links). */
   const onShouldStartLoadWithRequest = useCallback(
     (req: ShouldStartLoadRequest) => {
       const id = extractChapterId(req.url);
@@ -145,7 +137,7 @@ export default function ExploreScreen() {
           pathname: '/player/[chapterId]',
           params: { chapterId: id },
         } as unknown as Href);
-        return false; // cancel WebView navigation
+        return false;
       }
       return true;
     },
