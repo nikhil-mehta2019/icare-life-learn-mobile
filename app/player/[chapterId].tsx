@@ -1,5 +1,6 @@
-import { useLocalSearchParams, useRouter } from 'expo-router';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import { getItemAsync, setItemAsync } from 'expo-secure-store';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -11,9 +12,8 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
-import { getItemAsync, setItemAsync } from 'expo-secure-store';
-import { GestureDetector, Gesture, GestureHandlerRootView } from 'react-native-gesture-handler';
-import Video, { type VideoRef, type ReactVideoSource, type DRMType } from 'react-native-video';
+import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
+import Video, { type DRMType, type ReactVideoSource, type VideoRef } from 'react-native-video';
 import {
   fetchChapter,
   getMuxToken,
