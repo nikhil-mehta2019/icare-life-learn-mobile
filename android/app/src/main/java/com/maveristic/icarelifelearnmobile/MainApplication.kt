@@ -20,12 +20,35 @@ class MainApplication : Application(), ReactApplication {
 
   companion object {
     init {
-      Log.d("ICARE_INIT", ">>> companion object init — about to loadLibrary(fbjni)")
+      // Load fbjni then reactnative via System.loadLibrary (Java-frame path) at
+      // class-load time — before property initializers, attachBaseContext, or SoLoader.
+      //
+      // WHY THIS IS NECESSARY:
+      // SoLoader.loadLibrary("reactnative") routes through BackupSoSource when
+      // ApplicationSoSource can't find the file, using native dlopen() with no Java
+      // frame on the stack. In that context env->FindClass() inside libreactnative.so's
+      // JNI_OnLoad receives the boot ClassLoader (not the app's PathClassLoader), so
+      // FindClass("ReactNativeFeatureFlagsCxxInterop") returns null and RegisterNatives
+      // is silently skipped → UnsatisfiedLinkError at runtime.
+      //
+      // System.loadLibrary() always has a Java frame → env->FindClass() gets the app's
+      // PathClassLoader → FindClass succeeds → jni_lib_merge RegisterNatives succeeds.
+      // When SoLoader.loadLibrary("reactnative") is called later inside load(), the
+      // library is already in memory so JNI_OnLoad is not called again — the methods
+      // registered here persist.
+      Log.d("ICARE_INIT", ">>> companion: loading fbjni")
       try {
         System.loadLibrary("fbjni")
-        Log.d("ICARE_INIT", ">>> fbjni loaded OK in companion object init")
+        Log.d("ICARE_INIT", ">>> companion: fbjni OK")
       } catch (e: Throwable) {
-        Log.e("ICARE_INIT", ">>> fbjni load FAILED in companion object init: ${e.message}")
+        Log.e("ICARE_INIT", ">>> companion: fbjni FAILED — ${e.message}")
+      }
+      Log.d("ICARE_INIT", ">>> companion: loading reactnative")
+      try {
+        System.loadLibrary("reactnative")
+        Log.d("ICARE_INIT", ">>> companion: reactnative OK")
+      } catch (e: Throwable) {
+        Log.e("ICARE_INIT", ">>> companion: reactnative FAILED — ${e.message}")
       }
     }
   }
