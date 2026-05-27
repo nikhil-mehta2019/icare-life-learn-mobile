@@ -53,7 +53,7 @@ import {
   type Chapter,
   type MuxTokenResponse,
 } from '../../api/base44Client';
-import { waitForPlayerData } from '../../api/playerCache';
+import { waitForPlayerData, type BridgeResult } from '../../api/playerCache';
 import { requestWebViewTokens } from '../(tabs)/explore';
 import IcareOfflineDrm, {
   onDownloadProgress,
@@ -115,27 +115,26 @@ export default function ChapterPlayerScreen() {
         const handle = waitForPlayerData(chapterId);
         cancelWait = handle.cancel;
 
-        const cached = await handle.promise;
+        const result: BridgeResult = await handle.promise;
         if (cancelled) return;
-        cancelWait = null; // resolved — no longer need to cancel
+        cancelWait = null;
 
-        if (cached) {
+        if (result.ok) {
           console.log(`[player] Tokens received for chapter ${chapterId} — starting playback`);
-          setChapter(cached.chapter);
-          setTokens(cached.tokens);
+          setChapter(result.data.chapter);
+          setTokens(result.data.tokens);
           setMode('online');
           return;
         }
 
-        // 3) Bridge timed out or returned an error.
-        //    We do NOT fall back to a native getMuxToken() call because it
-        //    always fails with 401 on Android (no shared cookie jar).
-        //    Instead, surface a clear error so the user knows to re-tap or
-        //    check their login.
-        console.warn(`[player] No tokens received for chapter ${chapterId} — showing error`);
-        throw new Error(
-          'Could not load this chapter. Please make sure you are logged in and try again.'
-        );
+        // 3) Bridge returned an error or timed out.
+        //    Surface the EXACT error so it can be read on screen and diagnosed.
+        //    Common values:
+        //      "Chapter fetch failed (401)"  → user not logged in
+        //      "getMuxToken failed (401)"    → session expired
+        //      "Timed out after 10s..."      → network too slow or bridge not firing
+        console.warn(`[player] Bridge error for chapter ${chapterId}: ${result.error}`);
+        throw new Error(result.error);
       } catch (err: any) {
         if (cancelled) return;
         const msg = err?.message ?? String(err);
@@ -245,16 +244,16 @@ export default function ChapterPlayerScreen() {
     }
 
     const handle = waitForPlayerData(chapterId);
-    const data = await handle.promise;
+    const result = await handle.promise;
 
-    if (!data) {
-      console.warn(`[player] Download token fetch timed out for chapter ${chapterId}`);
-      Alert.alert('Download failed', 'Could not retrieve download token. Please try again.');
+    if (!result.ok) {
+      console.warn(`[player] Download token fetch failed for chapter ${chapterId}: ${result.error}`);
+      Alert.alert('Download failed', result.error);
       return;
     }
 
     try {
-      const tk = data.tokens;
+      const tk = result.data.tokens;
       console.log(`[player] Starting download for chapter ${chapterId}`);
       await IcareOfflineDrm.startDownload({
         id: chapterId,
@@ -297,17 +296,17 @@ export default function ChapterPlayerScreen() {
     }
 
     const handle = waitForPlayerData(chapterId);
-    const data = await handle.promise;
+    const result = await handle.promise;
 
-    if (!data) {
-      console.warn(`[player] Token refresh timed out after download deletion for chapter ${chapterId}`);
-      setErrorMsg('Could not resume streaming. Please go back and re-open the chapter.');
+    if (!result.ok) {
+      console.warn(`[player] Token refresh failed after download deletion for chapter ${chapterId}: ${result.error}`);
+      setErrorMsg(`Could not resume streaming: ${result.error}`);
       setMode('error');
       return;
     }
 
     console.log(`[player] Resuming online streaming for chapter ${chapterId}`);
-    setTokens(data.tokens);
+    setTokens(result.data.tokens);
     setMode('online');
   };
 

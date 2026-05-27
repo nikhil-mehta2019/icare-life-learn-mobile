@@ -47,7 +47,7 @@ import { useCallback, useRef } from 'react';
 import { StyleSheet } from 'react-native';
 import { WebView, type WebViewMessageEvent } from 'react-native-webview';
 import type { ShouldStartLoadRequest } from 'react-native-webview/lib/WebViewTypes';
-import { deliverPlayerData } from '../../api/playerCache';
+import { deliverPlayerData, deliverPlayerError } from '../../api/playerCache';
 import { API_KEY, BASE_URL } from '../../api/base44Client';
 
 const BASE44_URL = 'https://icare-life-learn.base44.app';
@@ -344,7 +344,7 @@ export default function ExploreScreen() {
             break;
           }
           console.warn(`[explore] CHAPTER_ERROR for chapter ${chapterId}: ${msg.error}`);
-          deliverPlayerData(chapterId, null);
+          deliverPlayerError(chapterId, String(msg.error ?? 'Unknown error from WebView bridge'));
           break;
 
         default:
