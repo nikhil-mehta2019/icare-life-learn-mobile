@@ -3,6 +3,7 @@ package com.maveristic.icarelifelearnmobile
 import android.app.Application
 import android.content.Context
 import android.content.res.Configuration
+import android.util.Log
 import com.facebook.react.PackageList
 import com.facebook.react.ReactApplication
 import com.facebook.react.ReactHost
@@ -16,6 +17,18 @@ import expo.modules.ApplicationLifecycleDispatcher
 import expo.modules.ReactNativeHostWrapper
 
 class MainApplication : Application(), ReactApplication {
+
+  companion object {
+    init {
+      Log.d("ICARE_INIT", ">>> companion object init — about to loadLibrary(fbjni)")
+      try {
+        System.loadLibrary("fbjni")
+        Log.d("ICARE_INIT", ">>> fbjni loaded OK in companion object init")
+      } catch (e: Throwable) {
+        Log.e("ICARE_INIT", ">>> fbjni load FAILED in companion object init: ${e.message}")
+      }
+    }
+  }
 
   override val reactNativeHost: ReactNativeHost =
     ReactNativeHostWrapper(this, object : DefaultReactNativeHost(this) {
@@ -37,28 +50,14 @@ class MainApplication : Application(), ReactApplication {
 
   override fun attachBaseContext(base: Context) {
     super.attachBaseContext(base)
-    // Pre-load libfbjni.so via System.loadLibrary (Java-frame path) before SoLoader.init()
-    // and before any ContentProvider or Expo module can load it via native dlopen.
-    //
-    // Root cause of UnsatisfiedLinkError: some Expo/RN native library loads as an ELF
-    // dependency early in the process (via native dlopen, no Java frame). This transitively
-    // loads libfbjni.so via the ELF linker — also no Java frame. fbjni's JNI_OnLoad caches
-    // the calling thread's class loader at first init; without a Java frame, it caches
-    // null/system class loader. Later, jni_lib_merge inside libreactnative.so's JNI_OnLoad
-    // calls fbjni.FindClass("ReactNativeFeatureFlagsCxxInterop") → returns null →
-    // RegisterNatives is never called → UnsatisfiedLinkError at runtime.
-    //
-    // Fix: load libfbjni.so here, from a Java frame, so fbjni caches the correct app
-    // PathClassLoader. The ELF linker won't call JNI_OnLoad again for already-loaded libs,
-    // so this one-time early load wins and all subsequent FindClass calls work correctly.
-    if (BuildConfig.IS_NEW_ARCHITECTURE_ENABLED) {
-      System.loadLibrary("fbjni")
-    }
+    Log.d("ICARE_INIT", ">>> attachBaseContext — IS_NEW_ARCH=${BuildConfig.IS_NEW_ARCHITECTURE_ENABLED}")
   }
 
   override fun onCreate() {
     super.onCreate()
+    Log.d("ICARE_INIT", ">>> onCreate — calling SoLoader.init")
     SoLoader.init(this, false)
+    Log.d("ICARE_INIT", ">>> SoLoader.init done — calling load()")
     if (BuildConfig.IS_NEW_ARCHITECTURE_ENABLED) {
       load()
     }
