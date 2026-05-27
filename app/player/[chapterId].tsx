@@ -20,6 +20,7 @@ import {
   selectMuxPlaybackId,
   type Chapter,
 } from '../../api/base44Client';
+import { waitForPlayerData } from '../../api/playerCache';
 import IcareOfflineDrm, {
   onDownloadProgress,
   type DownloadInfo,
@@ -52,7 +53,7 @@ export default function ChapterPlayerScreen() {
   const [offline, setOffline] = useState<OfflinePlaybackSource | null>(null);
   const [download, setDownload] = useState<DownloadInfo | null>(null);
 
-  // ----- Initial load: prefer offline source, fall back to online streaming.
+  // ----- Initial load: prefer offline, then bridge-provided tokens, then fallback.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -71,7 +72,23 @@ export default function ChapterPlayerScreen() {
           return;
         }
 
-        // 2) Online flow: fetch chapter, then signed Mux tokens.
+        // 2) Wait for tokens pre-fetched by the WebView bridge (authenticated).
+        //    The WebView has the user's session cookies; native fetch() does not.
+        //    waitForPlayerData resolves as soon as CHAPTER_TOKENS arrives, or
+        //    null after 10 s (falls through to the direct-fetch fallback).
+        const cached = await waitForPlayerData(chapterId);
+        if (cancelled) return;
+
+        if (cached) {
+          setChapter(cached.chapter);
+          setTokens(cached.tokens);
+          setMode('online');
+          return;
+        }
+
+        // 3) Fallback: direct API calls.
+        //    getMuxToken requires a session cookie so this will fail when the
+        //    user isn't logged in, but works in offline-capable / public modes.
         const ch = await fetchChapter(chapterId);
         if (cancelled) return;
         if (ch.status !== 200) throw new Error(`Chapter fetch ${ch.status}`);
@@ -79,13 +96,8 @@ export default function ChapterPlayerScreen() {
         const meta = ch.data;
         setChapter(meta);
 
-        // 3) Select the correct Mux playback ID.
-        //    Priority: DRM playback ID > Signed playback ID > Public playback ID.
-        //    Using the wrong ID causes unsigned streams or failed DRM license requests.
         const playbackId = selectMuxPlaybackId(meta);
-        if (!playbackId) {
-          throw new Error('Chapter has no Mux playback ID configured');
-        }
+        if (!playbackId) throw new Error('Chapter has no Mux playback ID configured');
 
         const tk = await getMuxToken(playbackId);
         if (cancelled) return;
@@ -376,29 +388,4 @@ const styles = StyleSheet.create({
   },
   btnDanger: { backgroundColor: '#a33b3b' },
   btnText: { color: '#fff', fontWeight: '600' },
-  muted: { color: 'rgba(255,255,255,0.6)', fontSize: 13 },
-  error: { color: '#f88', fontSize: 14 },
-  audioToast: {
-    position: 'absolute',
-    bottom: 16,
-    left: 12,
-    right: 12,
-    backgroundColor: 'rgba(0,0,0,0.82)',
-    borderRadius: 8,
-    padding: 12,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  audioToastText: {
-    color: '#fff',
-    fontSize: 13,
-    flex: 1,
-    lineHeight: 18,
-  },
-  audioToastDismiss: {
-    color: 'rgba(255,255,255,0.6)',
-    fontSize: 16,
-    paddingHorizontal: 4,
-  },
-});
+  muted: { color: 'rgba
