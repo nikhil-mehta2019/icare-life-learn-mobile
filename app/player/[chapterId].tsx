@@ -388,4 +388,29 @@ const styles = StyleSheet.create({
   },
   btnDanger: { backgroundColor: '#a33b3b' },
   btnText: { color: '#fff', fontWeight: '600' },
-  muted: { color: 'rgba
+  muted: { color: 'rgba(255,255,255,0.6)', fontSize: 13 },
+  error: { color: '#f88', fontSize: 14 },
+  audioToast: {
+    position: 'absolute',
+    bottom: 16,
+    left: 12,
+    right: 12,
+    backgroundColor: 'rgba(0,0,0,0.82)',
+    borderRadius: 8,
+    padding: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  audioToastText: {
+    color: '#fff',
+    fontSize: 13,
+    flex: 1,
+    lineHeight: 18,
+  },
+  audioToastDismiss: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 16,
+    paddingHorizontal: 4,
+  },
+});
