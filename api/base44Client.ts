@@ -1,9 +1,16 @@
 // SECURITY NOTE: API_KEY is bundled into the APK. Before production release,
 // move this to a runtime config fetched after auth, or use per-user signed
 // tokens served by a Base44 backend function.
+//
+// API_KEY and BASE_URL are exported so explore.tsx can inject them into the
+// WebView at runtime (via injectJavaScript) rather than embedding them in the
+// static injectedJavaScriptBeforeContentLoaded string.  This keeps them out of
+// the easily-readable static bundle text in the APK, though they remain in the
+// compiled JS bundle — a proper secrets-management solution (env var at build
+// time, or a post-auth token endpoint) is the long-term fix.
 
-const BASE_URL = 'https://icare-life-learn.base44.app/api';
-const API_KEY = '6af260f41e2140b9950788621360c5cf';
+export const BASE_URL = 'https://icare-life-learn.base44.app/api';
+export const API_KEY = '6af260f41e2140b9950788621360c5cf';
 
 const defaultHeaders: Record<string, string> = {
   'Content-Type': 'application/json',

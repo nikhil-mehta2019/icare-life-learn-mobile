@@ -1,3 +1,36 @@
+/**
+ * player/[chapterId].tsx
+ *
+ * Native video player screen for a single chapter.
+ *
+ * ─── Loading sequence ─────────────────────────────────────────────────────────
+ *
+ *  1. Check for an existing offline copy + DRM licence → play offline.
+ *  2. Wait for tokens pre-fetched by the WebView bridge (max 10 s).
+ *     The WebView has the user's session cookies; React Native's fetch() does
+ *     not share the cookie jar on Android, so all authenticated API calls are
+ *     routed through the WebView.
+ *  3. If the bridge times out or returns an error, show an error screen.
+ *     (The old "native getMuxToken fallback" has been removed because it always
+ *      fails with 401 — it was the source of the Unauthorized error.)
+ *
+ * ─── Token refresh (download / delete-download) ───────────────────────────────
+ *
+ *  Both actions require a fresh Mux token.  Instead of calling getMuxToken()
+ *  natively (which fails with 401 on Android), we request the tokens from the
+ *  WebView bridge via requestWebViewTokens() + waitForPlayerData().  This
+ *  ensures the authenticated session cookie is always used.
+ *
+ * ─── Component lifecycle / memory leak prevention ────────────────────────────
+ *
+ *  • The initial load effect holds a { promise, cancel } handle from
+ *    waitForPlayerData(). cancel() is called in the cleanup function so the
+ *    pending resolver and its 10 s timer are removed immediately on unmount.
+ *  • A `cancelled` flag guards every async continuation — if the component
+ *    unmounts between awaits, state updates are skipped.
+ *  • Keep-awake is activated while isPlaying and deactivated on unmount.
+ */
+
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { getItemAsync, setItemAsync } from 'expo-secure-store';
@@ -16,11 +49,12 @@ import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-g
 import Video, { type DRMType, type ReactVideoSource, type VideoRef } from 'react-native-video';
 import {
   fetchChapter,
-  getMuxToken,
   selectMuxPlaybackId,
   type Chapter,
+  type MuxTokenResponse,
 } from '../../api/base44Client';
 import { waitForPlayerData } from '../../api/playerCache';
+import { requestWebViewTokens } from '../(tabs)/explore';
 import IcareOfflineDrm, {
   onDownloadProgress,
   type DownloadInfo,
@@ -28,13 +62,6 @@ import IcareOfflineDrm, {
 } from '../../modules/icare-offline-drm';
 
 type Mode = 'loading' | 'online' | 'offline' | 'error';
-
-interface MuxTokenResponse {
-  token: string;
-  drmToken: string;
-  drmLicenseUrl: string;
-  secureStreamUrl: string;
-}
 
 export default function ChapterPlayerScreen() {
   const { chapterId } = useLocalSearchParams<{ chapterId: string }>();
@@ -53,17 +80,24 @@ export default function ChapterPlayerScreen() {
   const [offline, setOffline] = useState<OfflinePlaybackSource | null>(null);
   const [download, setDownload] = useState<DownloadInfo | null>(null);
 
-  // ----- Initial load: prefer offline, then bridge-provided tokens, then fallback.
+  // ----- Initial load --------------------------------------------------------
   useEffect(() => {
     let cancelled = false;
+    // cancelWait() clears our resolver from playerCache immediately on unmount,
+    // preventing the 10 s timer from firing setState on an unmounted component.
+    let cancelWait: (() => void) | null = null;
+
     (async () => {
       try {
         if (!chapterId) throw new Error('Missing chapterId');
+        console.log(`[player] Mounting for chapter ${chapterId}`);
 
         // 1) Check for an existing offline copy + license.
         const off = await IcareOfflineDrm.getOfflineSource({ id: chapterId });
         if (cancelled) return;
+
         if (off) {
+          console.log(`[player] Offline copy found for chapter ${chapterId}`);
           const ch = await fetchChapter(chapterId);
           if (cancelled) return;
           setChapter(ch.data);
@@ -72,51 +106,60 @@ export default function ChapterPlayerScreen() {
           return;
         }
 
-        // 2) Wait for tokens pre-fetched by the WebView bridge (authenticated).
-        //    The WebView has the user's session cookies; native fetch() does not.
-        //    waitForPlayerData resolves as soon as CHAPTER_TOKENS arrives, or
-        //    null after 10 s (falls through to the direct-fetch fallback).
-        const cached = await waitForPlayerData(chapterId);
+        // 2) Wait for tokens from the WebView bridge (authenticated).
+        //    The WebView has the user's session cookie; native fetch() does not.
+        console.log(`[player] No offline copy — requesting tokens from WebView bridge`);
+        const handle = waitForPlayerData(chapterId);
+        cancelWait = handle.cancel;
+
+        const cached = await handle.promise;
         if (cancelled) return;
+        cancelWait = null; // resolved — no longer need to cancel
 
         if (cached) {
+          console.log(`[player] Tokens received for chapter ${chapterId} — starting playback`);
           setChapter(cached.chapter);
           setTokens(cached.tokens);
           setMode('online');
           return;
         }
 
-        // 3) Fallback: direct API calls.
-        //    getMuxToken requires a session cookie so this will fail when the
-        //    user isn't logged in, but works in offline-capable / public modes.
-        const ch = await fetchChapter(chapterId);
-        if (cancelled) return;
-        if (ch.status !== 200) throw new Error(`Chapter fetch ${ch.status}`);
-
-        const meta = ch.data;
-        setChapter(meta);
-
-        const playbackId = selectMuxPlaybackId(meta);
-        if (!playbackId) throw new Error('Chapter has no Mux playback ID configured');
-
-        const tk = await getMuxToken(playbackId);
-        if (cancelled) return;
-        setTokens(tk);
-        setMode('online');
+        // 3) Bridge timed out or returned an error.
+        //    We do NOT fall back to a native getMuxToken() call because it
+        //    always fails with 401 on Android (no shared cookie jar).
+        //    Instead, surface a clear error so the user knows to re-tap or
+        //    check their login.
+        console.warn(`[player] No tokens received for chapter ${chapterId} — showing error`);
+        throw new Error(
+          'Could not load this chapter. Please make sure you are logged in and try again.'
+        );
       } catch (err: any) {
         if (cancelled) return;
-        setErrorMsg(err?.message ?? String(err));
+        const msg = err?.message ?? String(err);
+        console.error(`[player] Load error for chapter ${chapterId}: ${msg}`);
+        setErrorMsg(msg);
         setMode('error');
       }
     })();
-    return () => { cancelled = true; };
+
+    return () => {
+      cancelled = true;
+      if (cancelWait) {
+        cancelWait();
+        cancelWait = null;
+      }
+      console.log(`[player] Unmounting — cleanup complete for chapter ${chapterId}`);
+    };
   }, [chapterId]);
 
-  // ----- Subscribe to download progress for this chapter.
+  // ----- Download progress subscription ------------------------------------
   useEffect(() => {
     if (!chapterId) return;
     const sub = onDownloadProgress((evt) => {
-      if (evt.id === chapterId) setDownload(evt);
+      if (evt.id === chapterId) {
+        console.log(`[player] Download progress for chapter ${chapterId}: ${evt.percentDownloaded}%`);
+        setDownload(evt);
+      }
     });
     IcareOfflineDrm.getDownload(chapterId).then((d) => {
       if (d) setDownload(d);
@@ -124,7 +167,7 @@ export default function ChapterPlayerScreen() {
     return () => sub.remove();
   }, [chapterId]);
 
-  // ----- Audio language toast: show once per device if multiple tracks found. -----
+  // ----- Audio language toast -----------------------------------------------
   const handleVideoLoad = async (data: any) => {
     const tracks: any[] = data?.audioTracks ?? [];
     if (tracks.length <= 1) return;
@@ -143,7 +186,7 @@ export default function ChapterPlayerScreen() {
     ]).start(() => setAudioToastVisible(false));
   };
 
-  // ----- Keep screen awake while playing, release on pause/end/unmount. -----
+  // ----- Keep screen awake --------------------------------------------------
   useEffect(() => {
     const TAG = 'video-player';
     if (isPlaying) {
@@ -154,14 +197,10 @@ export default function ChapterPlayerScreen() {
     return () => { deactivateKeepAwake(TAG); };
   }, [isPlaying]);
 
-  // ----- Build the Video source. -----
+  // ----- Build Video source -------------------------------------------------
   const source: ReactVideoSource | null = useMemo(() => {
     if (mode === 'offline' && offline) {
-      return {
-        uri: offline.uri,
-        type: 'm3u8',
-        cacheKey: offline.cacheKey,
-      } as ReactVideoSource;
+      return { uri: offline.uri, type: 'm3u8', cacheKey: offline.cacheKey } as ReactVideoSource;
     }
     if (mode === 'online' && tokens) {
       return { uri: tokens.secureStreamUrl, type: 'm3u8' } as ReactVideoSource;
@@ -169,13 +208,10 @@ export default function ChapterPlayerScreen() {
     return null;
   }, [mode, offline, tokens]);
 
-  // ----- DRM block -----
+  // ----- DRM config ---------------------------------------------------------
   const drm = useMemo(() => {
     if (mode === 'offline' && offline) {
-      return {
-        type: 'widevine' as DRMType,
-        offlineLicense: offline.offlineLicenseKeySetId,
-      };
+      return { type: 'widevine' as DRMType, offlineLicense: offline.offlineLicenseKeySetId };
     }
     if (mode === 'online' && tokens) {
       return {
@@ -187,45 +223,92 @@ export default function ChapterPlayerScreen() {
     return undefined;
   }, [mode, offline, tokens]);
 
+  // ----- Download -----------------------------------------------------------
+  /**
+   * Request a fresh token via the WebView bridge, then start the download.
+   * This avoids calling getMuxToken() natively (which fails with 401 on Android
+   * because React Native's fetch() does not share the WebView cookie jar).
+   */
   const handleDownload = async () => {
-    if (!chapter) return;
+    if (!chapter || !chapterId) return;
     const playbackId = selectMuxPlaybackId(chapter);
     if (!playbackId) return;
+
+    console.log(`[player] Requesting download tokens for chapter ${chapterId}`);
+    const dispatched = requestWebViewTokens(chapterId);
+    if (!dispatched) {
+      Alert.alert('Download failed', 'Please return to the course page and try again.');
+      return;
+    }
+
+    const handle = waitForPlayerData(chapterId);
+    const data = await handle.promise;
+
+    if (!data) {
+      console.warn(`[player] Download token fetch timed out for chapter ${chapterId}`);
+      Alert.alert('Download failed', 'Could not retrieve download token. Please try again.');
+      return;
+    }
+
     try {
-      const tk = await getMuxToken(playbackId);
+      const tk = data.tokens;
+      console.log(`[player] Starting download for chapter ${chapterId}`);
       await IcareOfflineDrm.startDownload({
-        id: chapter.id,
+        id: chapterId,
         manifestUrl: tk.secureStreamUrl,
         drmLicenseUrl: tk.drmLicenseUrl,
         drmToken: tk.drmToken,
         title: chapter.title,
       });
     } catch (err: any) {
+      console.error(`[player] Download start failed for chapter ${chapterId}: ${err?.message}`);
       Alert.alert('Download failed', err?.message ?? String(err));
     }
   };
 
+  // ----- Delete download ----------------------------------------------------
+  /**
+   * Remove the offline copy, then re-fetch tokens via the WebView bridge to
+   * resume online streaming.  This avoids the native getMuxToken() 401 issue.
+   */
   const handleDeleteDownload = async () => {
     if (!chapterId) return;
+    console.log(`[player] Deleting download for chapter ${chapterId}`);
     await IcareOfflineDrm.removeDownload(chapterId);
     setDownload(null);
     setOffline(null);
-    if (chapter) {
-      const playbackId = selectMuxPlaybackId(chapter);
-      if (playbackId) {
-        try {
-          const tk = await getMuxToken(playbackId);
-          setTokens(tk);
-          setMode('online');
-        } catch (err: any) {
-          setErrorMsg(err?.message ?? String(err));
-          setMode('error');
-        }
-      }
+
+    if (!chapter) {
+      setErrorMsg('Cannot resume streaming — chapter metadata not available.');
+      setMode('error');
+      return;
     }
+
+    setMode('loading');
+    console.log(`[player] Requesting fresh tokens after download deletion for chapter ${chapterId}`);
+    const dispatched = requestWebViewTokens(chapterId);
+    if (!dispatched) {
+      setErrorMsg('Please return to the course page and tap the chapter again to resume streaming.');
+      setMode('error');
+      return;
+    }
+
+    const handle = waitForPlayerData(chapterId);
+    const data = await handle.promise;
+
+    if (!data) {
+      console.warn(`[player] Token refresh timed out after download deletion for chapter ${chapterId}`);
+      setErrorMsg('Could not resume streaming. Please go back and re-open the chapter.');
+      setMode('error');
+      return;
+    }
+
+    console.log(`[player] Resuming online streaming for chapter ${chapterId}`);
+    setTokens(data.tokens);
+    setMode('online');
   };
 
-  // ----- Render -----
+  // ----- Render: loading / error --------------------------------------------
   if (mode === 'loading') {
     return (
       <View style={styles.center}>
@@ -246,7 +329,7 @@ export default function ChapterPlayerScreen() {
     );
   }
 
-  // Pinch gesture: spreading fingers → fullscreen, pinching in → exit fullscreen
+  // ----- Pinch-to-fullscreen gesture ----------------------------------------
   const pinchGesture = Gesture.Pinch()
     .runOnJS(true)
     .onEnd((e) => {
@@ -259,9 +342,9 @@ export default function ChapterPlayerScreen() {
       }
     });
 
-  // Natural player height based on screen width, 16:9
   const playerHeight = (width / 16) * 9;
 
+  // ----- Render: player -----------------------------------------------------
   return (
     <GestureHandlerRootView style={styles.container}>
       <GestureDetector gesture={pinchGesture}>
@@ -281,8 +364,9 @@ export default function ChapterPlayerScreen() {
               style={StyleSheet.absoluteFill}
               onError={(e: any) => {
                 setIsPlaying(false);
-                console.warn('[player] error', e);
-                Alert.alert('Playback error', JSON.stringify(e?.error ?? e));
+                const detail = JSON.stringify(e?.error ?? e);
+                console.error(`[player] Playback error for chapter ${chapterId}: ${detail}`);
+                Alert.alert('Playback error', detail);
               }}
             />
           )}
@@ -320,6 +404,8 @@ export default function ChapterPlayerScreen() {
     </GestureHandlerRootView>
   );
 }
+
+// ─── DownloadControls ─────────────────────────────────────────────────────────
 
 function DownloadControls({
   download,
@@ -371,6 +457,8 @@ function DownloadControls({
   );
 }
 
+// ─── Styles ───────────────────────────────────────────────────────────────────
+
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
   playerWrap: { backgroundColor: '#000', position: 'relative' },
@@ -402,15 +490,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 10,
   },
-  audioToastText: {
-    color: '#fff',
-    fontSize: 13,
-    flex: 1,
-    lineHeight: 18,
-  },
-  audioToastDismiss: {
-    color: 'rgba(255,255,255,0.6)',
-    fontSize: 16,
-    paddingHorizontal: 4,
-  },
+  audioToastText: { color: '#fff', fontSize: 13, flex: 1, lineHeight: 18 },
+  audioToastDismiss: { color: 'rgba(255,255,255,0.6)', fontSize: 16, paddingHorizontal: 4 },
 });
