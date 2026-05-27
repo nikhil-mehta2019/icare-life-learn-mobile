@@ -94,9 +94,13 @@ export function extractChapterId(url: string): string | null {
 // ─── Injected JavaScript ─────────────────────────────────────────────────────
 //
 // Injected before page content so it survives SPA navigations.
-// Does NOT contain the API key — the key is injected separately via
-// injectJavaScript() after BRIDGE_READY fires, keeping it out of the static
-// bundle text that can be read from the APK.
+//
+// API key is embedded here at build time. It is present in the compiled JS
+// bundle regardless (imported via base44Client.ts), so embedding it here costs
+// nothing extra in security terms and avoids a fatal timing race: if the key
+// were delivered only after BRIDGE_READY, a chapter tap during the first 800ms
+// of page load would call _doFetchTokens() before the key arrived, post
+// CHAPTER_ERROR immediately, and show "Could not load chapter" on the first tap.
 //
 // Regex sources are serialised as JSON from the TS constant above so they
 // stay in sync with the native detection logic — one source of truth.
@@ -137,24 +141,20 @@ const INJECTED_JS = `
     return null;
   }
 
-  // ── Token fetch (uses WebView session cookies — no API key needed here) ───
-  // API key + base URL are injected by native after BRIDGE_READY.
-  var _apiKey  = null;
-  var _baseApi = null;
+  // ── API credentials — embedded at build time ──────────────────────────────
+  // These are present in the compiled JS bundle via base44Client.ts regardless.
+  // Embedding them here ensures token fetches work immediately on the first tap
+  // without waiting for a BRIDGE_READY → injectJavaScript round-trip.
+  var _apiKey  = ${JSON.stringify(API_KEY)};
+  var _baseApi = ${JSON.stringify(BASE_URL)};
 
-  window.__icareFetchTokens = function(chapterId, apiKey, baseApi) {
-    _apiKey  = apiKey;
-    _baseApi = baseApi;
+  // __icareFetchTokens is still exposed so the native layer can trigger a
+  // fresh token fetch for download / delete-download without a navigation event.
+  window.__icareFetchTokens = function(chapterId) {
     _doFetchTokens(chapterId);
   };
 
   function _doFetchTokens(chapterId) {
-    if (!_apiKey || !_baseApi) {
-      log('warn', 'fetchTokens called before API key was injected — chapterId: ' + chapterId);
-      _postMessage({ type: 'CHAPTER_ERROR', chapterId: chapterId,
-                     error: 'Bridge not yet initialised with API key' });
-      return;
-    }
     log('info', 'Fetching tokens for chapter ' + chapterId);
     var hdrs = { 'Content-Type': 'application/json', 'api_key': _apiKey };
 
@@ -237,9 +237,9 @@ const INJECTED_JS = `
     log('info', 'Chapter URL detected: ' + chapterId + ' — posting OPEN_CHAPTER');
     _postMessage({ type: 'OPEN_CHAPTER', chapterId: chapterId });
 
-    // Token fetch starts immediately; no history.back() is called.
-    // The native side will call window.__icareFetchTokens() after injecting
-    // the API key, OR the fetch will proceed if the key was already injected.
+    // Token fetch starts immediately using the embedded credentials.
+    // No history.back() is called — the WebView stays on the chapter URL
+    // so the session cookie remains valid for the duration of the fetch.
     _doFetchTokens(chapterId);
   }
 
@@ -275,15 +275,14 @@ export default function ExploreScreen() {
   const webRef = useRef<WebView>(null);
 
   /**
-   * After the bridge signals it is ready, inject the API key + base URL.
-   * This keeps credentials out of the static injectedJavaScriptBeforeContentLoaded
-   * string (which is readable in the APK JS bundle) and delivers them only at
-   * runtime via an encrypted IPC channel.
+   * Triggers a fresh token fetch inside the WebView for a specific chapter.
+   * Used by the download and delete-download flows in the player screen.
+   * The API key is already embedded in the injected JS — we only need to
+   * call __icareFetchTokens with the chapterId.
    */
   const injectApiCredentials = useCallback((chapterId?: string) => {
-    const script = chapterId
-      ? `window.__icareFetchTokens(${JSON.stringify(chapterId)}, ${JSON.stringify(API_KEY)}, ${JSON.stringify(BASE_URL)}); true;`
-      : `window._icareApiKey = ${JSON.stringify(API_KEY)}; window._icareBaseApi = ${JSON.stringify(BASE_URL)}; true;`;
+    if (!chapterId) return; // Nothing to do — key already embedded at boot
+    const script = `window.__icareFetchTokens(${JSON.stringify(chapterId)}); true;`;
     webRef.current?.injectJavaScript(script);
   }, []);
 
@@ -310,8 +309,9 @@ export default function ExploreScreen() {
 
       switch (type) {
         case 'BRIDGE_READY':
-          console.log('[explore] WebView bridge ready — injecting API credentials');
-          injectApiCredentials();
+          // API key is already embedded in injectedJavaScriptBeforeContentLoaded.
+          // BRIDGE_READY is kept as a diagnostic signal — log it and move on.
+          console.log('[explore] WebView bridge ready — credentials already embedded, no injection needed');
           break;
 
         case 'OPEN_CHAPTER':
@@ -377,8 +377,10 @@ export default function ExploreScreen() {
 
   /**
    * When the player screen needs fresh tokens (download / delete-download),
-   * it calls this function which triggers the WebView bridge to fetch and post
-   * CHAPTER_TOKENS.  The player calls waitForPlayerData() to receive the result.
+   * it calls this function which calls window.__icareFetchTokens(chapterId)
+   * inside the authenticated WebView.  The API key is already embedded in the
+   * injected JS — only the chapterId needs to be passed at call time.
+   * The player calls waitForPlayerData() to receive the result.
    */
   const requestTokensFromWebView = useCallback((chapterId: string) => {
     console.log(`[explore] Requesting fresh tokens from WebView for chapter ${chapterId}`);
