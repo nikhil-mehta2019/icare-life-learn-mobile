@@ -81,7 +81,14 @@ class MainApplication : Application(), ReactApplication {
     super.onCreate()
     Log.d("ICARE_INIT", ">>> onCreate — calling SoLoader.init with OpenSourceMergedSoMapping")
     SoLoader.init(this, OpenSourceMergedSoMapping)
-    Log.d("ICARE_INIT", ">>> SoLoader.init done — calling load()")
+    Log.d("ICARE_INIT", ">>> SoLoader.init done")
+    // Explicitly invoke reactnativejni's JNI_OnLoad via the merged SO mapping.
+    // In New Architecture mode, BridgeSoLoader (@LegacyArchitecture) is not used,
+    // so nothing else calls SoLoader.loadLibrary("reactnativejni"). Without this,
+    // Java TurboModules like PlatformConstants are never registered.
+    Log.d("ICARE_INIT", ">>> loading reactnativejni")
+    SoLoader.loadLibrary("reactnativejni")
+    Log.d("ICARE_INIT", ">>> reactnativejni loaded — calling load()")
     if (BuildConfig.IS_NEW_ARCHITECTURE_ENABLED) {
       load()
     }
