@@ -148,6 +148,29 @@ const INJECTED_JS = `
   var _apiKey  = ${JSON.stringify(API_KEY)};
   var _baseApi = ${JSON.stringify(BASE_URL)};
 
+  // ── Fetch helper with AbortController timeout ─────────────────────────────
+  var FETCH_TIMEOUT_MS = 8000;
+
+  function fetchJsonWithTimeout(label, url, options, timeoutMs) {
+    return new Promise(function(resolve, reject) {
+      var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+      var timer = setTimeout(function() {
+        if (controller) controller.abort();
+        reject(new Error(label + ' timed out after ' + timeoutMs + 'ms'));
+      }, timeoutMs);
+      var opts = controller
+        ? Object.assign({}, options, { signal: controller.signal })
+        : options;
+      fetch(url, opts).then(function(r) {
+        clearTimeout(timer);
+        resolve(r);
+      }).catch(function(e) {
+        clearTimeout(timer);
+        reject(e);
+      });
+    });
+  }
+
   // __icareFetchTokens is still exposed so the native layer can trigger a
   // fresh token fetch for download / delete-download without a navigation event.
   window.__icareFetchTokens = function(chapterId) {
@@ -160,8 +183,8 @@ const INJECTED_JS = `
     log('info', 'Fetching tokens for chapter ' + chapterId);
     var hdrs = { 'Content-Type': 'application/json', 'api_key': key };
 
-    fetch(api + '/entities/Chapter/' + chapterId,
-          { headers: hdrs, credentials: 'include' })
+    fetchJsonWithTimeout('Chapter fetch', api + '/entities/Chapter/' + chapterId,
+          { headers: hdrs, credentials: 'include' }, FETCH_TIMEOUT_MS)
       .then(function(r) {
         if (!r.ok) throw new Error('Chapter fetch failed (' + r.status + ')');
         return r.json();
@@ -176,12 +199,12 @@ const INJECTED_JS = `
 
         if (!playbackId) throw new Error('Chapter has no Mux playback ID');
 
-        return fetch(api + '/functions/getMuxToken', {
+        return fetchJsonWithTimeout('getMuxToken', api + '/functions/getMuxToken', {
           method: 'POST',
           headers: hdrs,
           credentials: 'include',
           body: JSON.stringify({ playbackId: playbackId }),
-        }).then(function(r) {
+        }, FETCH_TIMEOUT_MS).then(function(r) {
           if (!r.ok) {
             return r.json().catch(function() { return {}; }).then(function(eb) {
               throw new Error(eb.error || ('getMuxToken failed (' + r.status + ')'));
@@ -189,22 +212,26 @@ const INJECTED_JS = `
           }
           return r.json().then(function(tokens) {
             log('info', 'Tokens fetched OK for chapter ' + chapterId);
-            _postMessage({ type: 'CHAPTER_TOKENS', chapterId: chapterId,
-                           chapter: chapter, tokens: tokens });
             if (navigateAfter) {
-              log('info', 'Tokens ready — opening player for chapter ' + chapterId);
-              _postMessage({ type: 'OPEN_CHAPTER', chapterId: chapterId });
+              log('info', 'Posting OPEN_CHAPTER_WITH_TOKENS for chapter ' + chapterId);
+              _postMessage({ type: 'OPEN_CHAPTER_WITH_TOKENS', chapterId: chapterId,
+                             chapter: chapter, tokens: tokens });
+            } else {
+              _postMessage({ type: 'CHAPTER_TOKENS', chapterId: chapterId,
+                             chapter: chapter, tokens: tokens });
             }
           });
         });
       })
       .catch(function(err) {
         log('error', 'Token fetch failed for chapter ' + chapterId + ': ' + String(err));
-        _postMessage({ type: 'CHAPTER_ERROR', chapterId: chapterId,
-                       error: String(err) });
         if (navigateAfter) {
-          log('info', 'Token error — opening player to show error for chapter ' + chapterId);
-          _postMessage({ type: 'OPEN_CHAPTER', chapterId: chapterId });
+          log('info', 'Posting OPEN_CHAPTER_WITH_ERROR for chapter ' + chapterId);
+          _postMessage({ type: 'OPEN_CHAPTER_WITH_ERROR', chapterId: chapterId,
+                         error: String(err) });
+        } else {
+          _postMessage({ type: 'CHAPTER_ERROR', chapterId: chapterId,
+                         error: String(err) });
         }
       });
   }
@@ -300,10 +327,12 @@ export default function ExploreScreen() {
   /**
    * onMessage — single entry point for all WebView → native messages.
    *
-   * BRIDGE_READY   — inject API credentials so token fetches can proceed
-   * OPEN_CHAPTER   — push native player screen
-   * CHAPTER_TOKENS — deliver pre-fetched tokens to waiting player screen
-   * CHAPTER_ERROR  — unblock waiting player screen (will fall through to error)
+   * BRIDGE_READY              — diagnostic signal, credentials already embedded
+   * OPEN_CHAPTER_WITH_TOKENS  — cache tokens FIRST, then push player screen
+   * OPEN_CHAPTER_WITH_ERROR   — cache error FIRST, then push player screen
+   * OPEN_CHAPTER              — legacy fallback: navigate without pre-cached data
+   * CHAPTER_TOKENS            — deliver tokens for download / delete-download flows
+   * CHAPTER_ERROR             — unblock player for download / delete-download flows
    */
   const onMessage = useCallback(
     (e: WebViewMessageEvent) => {
@@ -323,6 +352,35 @@ export default function ExploreScreen() {
           // API key is already embedded in injectedJavaScriptBeforeContentLoaded.
           // BRIDGE_READY is kept as a diagnostic signal — log it and move on.
           console.log('[explore] WebView bridge ready — credentials already embedded, no injection needed');
+          break;
+
+        case 'OPEN_CHAPTER_WITH_TOKENS':
+          if (!chapterId) {
+            console.warn('[explore] OPEN_CHAPTER_WITH_TOKENS received without chapterId — ignored');
+            break;
+          }
+          console.log(`[explore] OPEN_CHAPTER_WITH_TOKENS → caching then navigating for chapter ${chapterId}`);
+          deliverPlayerData(chapterId, {
+            chapter: msg.chapter as any,
+            tokens: msg.tokens as any,
+          });
+          router.push({
+            pathname: '/player/[chapterId]',
+            params: { chapterId },
+          } as unknown as Href);
+          break;
+
+        case 'OPEN_CHAPTER_WITH_ERROR':
+          if (!chapterId) {
+            console.warn('[explore] OPEN_CHAPTER_WITH_ERROR received without chapterId — ignored');
+            break;
+          }
+          console.warn(`[explore] OPEN_CHAPTER_WITH_ERROR for chapter ${chapterId}: ${msg.error}`);
+          deliverPlayerError(chapterId, String(msg.error ?? 'Unknown error from WebView bridge'));
+          router.push({
+            pathname: '/player/[chapterId]',
+            params: { chapterId },
+          } as unknown as Href);
           break;
 
         case 'OPEN_CHAPTER':

@@ -6,7 +6,8 @@
   "build": {
     "development": {
       "developmentClient": true,
-      "distribution": "internal"
+      "distribution": "internal",
+      "prebuildCommand": "echo 'skipping prebuild'"
     },
     "preview": {
       "distribution": "internal",

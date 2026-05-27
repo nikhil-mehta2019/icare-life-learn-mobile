@@ -51,8 +51,11 @@ export type BridgeResult =
   | { ok: true;  data: CachedPlayerData }
   | { ok: false; error: string };
 
-/** How long to wait for the WebView to deliver tokens before resolving null. */
-const TIMEOUT_MS = 10_000;
+/** How long to wait for the WebView to deliver tokens before resolving null.
+ *  Set to 20 s: the WebView bridge now has two sequential 8 s fetch timeouts
+ *  (Chapter + getMuxToken), so the native timeout must be longer to let the
+ *  bridge deliver a specific error rather than firing the generic timeout first. */
+const TIMEOUT_MS = 20_000;
 
 /** How long a pre-cached entry remains valid. Mux tokens are long-lived but we
  *  refresh conservatively to avoid serving stale DRM licenses. */
