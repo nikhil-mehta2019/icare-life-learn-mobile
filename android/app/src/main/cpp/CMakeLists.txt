@@ -1,26 +1,17 @@
-cmake_minimum_required(VERSION 3.22.1)
-project(rnmergedstubs)
+cmake_minimum_required(VERSION 3.13)
 
-# These libraries are all merged into libreactnative.so via jni_lib_merge in
-# React Native 0.76+. They do NOT exist as standalone .so files, but SoLoader
-# still tries to find them by file when Java class initializers call
-# SoLoader.loadLibrary("<name>"). We build minimal stubs to satisfy that check.
-# The real JNI methods are registered by libreactnative.so's JNI_OnLoad.
+# Build appmodules.so — the glue library for React Native New Architecture.
+# Its JNI_OnLoad sets DefaultTurboModuleManagerDelegate::javaModuleProvider
+# (and cxxModuleProvider / registerComponentDescriptorsFromEntryPoint).
+# Without this, javaModuleProvider stays nullptr and ALL Java TurboModules
+# (PlatformConstants, DeviceInfo, etc.) are unreachable from C++.
+#
+# ReactNative-application.cmake:
+#   - Picks up default-app-setup/OnLoad.cpp (no .cpp in this dir → no override)
+#   - Includes generated autolinking sources from ${PROJECT_BUILD_DIR}/generated/
+#   - Links against ReactAndroid prefab (reactnative, jsi, fbjni)
+#   - REACT_ANDROID_DIR / PROJECT_BUILD_DIR are injected by NdkConfiguratorUtils
+#     in the react-native-gradle-plugin via autolinkLibrariesWithApp()
 
-set(MERGED_LIBS
-    react_featureflagsjni
-    fabricjni
-    react_devsupportjni
-    react_newarchdefaults
-    reactnativeblob
-    reactnativejni
-    reactnativejni_common
-    rninstance
-    turbomodulejsijni
-    uimanagerjni
-    yoga
-)
-
-foreach(LIB_NAME ${MERGED_LIBS})
-    add_library(${LIB_NAME} SHARED stub.cpp)
-endforeach()
+project(appmodules)
+include(${REACT_ANDROID_DIR}/cmake-utils/ReactNative-application.cmake)
