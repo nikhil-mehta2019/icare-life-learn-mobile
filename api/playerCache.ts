@@ -42,6 +42,15 @@ export interface CachedPlayerData {
   tokens: MuxTokenResponse;
 }
 
+/**
+ * Wraps the result of a bridge fetch — either data or an error reason.
+ * Using a discriminated union means we never lose the error message when
+ * the bridge posts CHAPTER_ERROR; the player can surface it directly.
+ */
+export type BridgeResult =
+  | { ok: true;  data: CachedPlayerData }
+  | { ok: false; error: string };
+
 /** How long to wait for the WebView to deliver tokens before resolving null. */
 const TIMEOUT_MS = 10_000;
 
@@ -57,7 +66,7 @@ interface StoredEntry {
 }
 
 interface PendingResolver {
-  resolve: (d: CachedPlayerData | null) => void;
+  resolve: (d: BridgeResult) => void;
   timer: ReturnType<typeof setTimeout>;
 }
 
@@ -65,6 +74,9 @@ interface PendingResolver {
 
 /** Tokens that arrived before the player screen mounted (fast network path). */
 const store: Record<string, StoredEntry> = {};
+
+/** Errors that arrived before the player mounted — carried so we don't lose them. */
+const errorStore: Record<string, string> = {};
 
 /** Resolvers waiting inside waitForPlayerData(). */
 const pending: Record<string, PendingResolver[]> = {};
@@ -83,9 +95,20 @@ const pending: Record<string, PendingResolver[]> = {};
  *   return () => { cancelled = true; cancel(); };
  */
 export function waitForPlayerData(chapterId: string): {
-  promise: Promise<CachedPlayerData | null>;
+  promise: Promise<BridgeResult>;
   cancel: () => void;
 } {
+  // Fast path: error already arrived before this call.
+  if (chapterId in errorStore) {
+    const error = errorStore[chapterId];
+    delete errorStore[chapterId];
+    console.warn(`[playerCache] Replaying cached error for chapter ${chapterId}: ${error}`);
+    return {
+      promise: Promise.resolve({ ok: false, error } as BridgeResult),
+      cancel: () => { /* nothing to cancel */ },
+    };
+  }
+
   // Fast path: tokens already arrived before this call.
   const cached = store[chapterId];
   if (cached) {
@@ -93,7 +116,7 @@ export function waitForPlayerData(chapterId: string): {
       delete store[chapterId];
       console.log(`[playerCache] Cache hit for chapter ${chapterId}`);
       return {
-        promise: Promise.resolve(cached.data),
+        promise: Promise.resolve({ ok: true, data: cached.data } as BridgeResult),
         cancel: () => { /* nothing to cancel */ },
       };
     }
@@ -105,11 +128,12 @@ export function waitForPlayerData(chapterId: string): {
   // Slow path: register a resolver and wait.
   let resolver!: PendingResolver;
 
-  const promise = new Promise<CachedPlayerData | null>((resolve) => {
+  const promise = new Promise<BridgeResult>((resolve) => {
     const timer = setTimeout(() => {
       _removeResolver(chapterId, resolver);
-      console.warn(`[playerCache] Timeout waiting for tokens for chapter ${chapterId} — falling back`);
-      resolve(null);
+      const msg = `Timed out after ${TIMEOUT_MS / 1000}s waiting for WebView bridge tokens`;
+      console.warn(`[playerCache] ${msg} for chapter ${chapterId}`);
+      resolve({ ok: false, error: msg });
     }, TIMEOUT_MS);
 
     // Prevent the timer from blocking Node/JS teardown in tests.
@@ -133,33 +157,46 @@ export function waitForPlayerData(chapterId: string): {
 }
 
 /**
- * Called from explore.tsx when CHAPTER_TOKENS or CHAPTER_ERROR arrives.
- * Pass null on error so waitForPlayerData() unblocks immediately.
+ * Called from explore.tsx when CHAPTER_TOKENS arrives.
  */
 export function deliverPlayerData(
   chapterId: string,
-  data: CachedPlayerData | null
+  data: CachedPlayerData
 ): void {
+  const result: BridgeResult = { ok: true, data };
   const waiters = pending[chapterId];
 
   if (waiters && waiters.length > 0) {
-    console.log(
-      `[playerCache] Delivering ${data ? 'tokens' : 'null (error)'} to ${waiters.length} waiter(s) for chapter ${chapterId}`
-    );
-    // Snapshot the array before clearing — resolver callbacks could re-enter.
+    console.log(`[playerCache] Delivering tokens to ${waiters.length} waiter(s) for chapter ${chapterId}`);
     const snapshot = [...waiters];
     delete pending[chapterId];
-    snapshot.forEach((w) => {
-      clearTimeout(w.timer);
-      w.resolve(data);
-    });
-  } else if (data) {
-    // No waiter yet — store for pickup when player mounts.
+    snapshot.forEach((w) => { clearTimeout(w.timer); w.resolve(result); });
+  } else {
     console.log(`[playerCache] No waiters yet — caching tokens for chapter ${chapterId}`);
     store[chapterId] = { data, expiresAt: Date.now() + STORE_TTL_MS };
+  }
+}
+
+/**
+ * Called from explore.tsx when CHAPTER_ERROR arrives.
+ * Carries the error string so the player can display the exact reason.
+ */
+export function deliverPlayerError(
+  chapterId: string,
+  error: string
+): void {
+  const result: BridgeResult = { ok: false, error };
+  const waiters = pending[chapterId];
+
+  if (waiters && waiters.length > 0) {
+    console.warn(`[playerCache] Delivering error to ${waiters.length} waiter(s) for chapter ${chapterId}: ${error}`);
+    const snapshot = [...waiters];
+    delete pending[chapterId];
+    snapshot.forEach((w) => { clearTimeout(w.timer); w.resolve(result); });
   } else {
-    // Error and no waiters — nothing to do.
-    console.warn(`[playerCache] Received error for chapter ${chapterId} with no waiters`);
+    // No waiter yet — store error for pickup when player mounts.
+    console.warn(`[playerCache] No waiters — storing error for chapter ${chapterId}: ${error}`);
+    errorStore[chapterId] = error;
   }
 }
 
@@ -172,11 +209,12 @@ export function clearChapterData(chapterId: string): void {
   if (waiters) {
     waiters.forEach((w) => {
       clearTimeout(w.timer);
-      w.resolve(null);
+      w.resolve({ ok: false, error: 'Cleared by clearChapterData()' });
     });
     delete pending[chapterId];
   }
   delete store[chapterId];
+  delete errorStore[chapterId];
   console.log(`[playerCache] Cleared all state for chapter ${chapterId}`);
 }
 
