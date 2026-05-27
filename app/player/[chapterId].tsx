@@ -188,16 +188,18 @@ export default function ChapterPlayerScreen() {
     ]).start(() => setAudioToastVisible(false));
   };
 
-  // ----- Keep screen awake --------------------------------------------------
+  // ----- Keep screen awake while player screen is visible ------------------
+  //
+  // Activated on mount rather than gated on isPlaying.  onPlaybackRateChange
+  // can fire inconsistently on some Android/RNVideo builds, leaving isPlaying
+  // stuck at false even when video is running — which would let the screen lock
+  // mid-playback.  The player screen only exists while the user is watching, so
+  // keeping the screen awake for its entire lifetime is the correct behaviour.
   useEffect(() => {
     const TAG = 'video-player';
-    if (isPlaying) {
-      activateKeepAwakeAsync(TAG);
-    } else {
-      deactivateKeepAwake(TAG);
-    }
+    activateKeepAwakeAsync(TAG);
     return () => { deactivateKeepAwake(TAG); };
-  }, [isPlaying]);
+  }, []);
 
   // ----- Build Video source -------------------------------------------------
   const source: ReactVideoSource | null = useMemo(() => {
