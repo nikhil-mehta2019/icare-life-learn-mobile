@@ -154,7 +154,7 @@ const INJECTED_JS = `
     _doFetchTokens(chapterId);
   };
 
-  function _doFetchTokens(chapterId) {
+  function _doFetchTokens(chapterId, navigateAfter) {
     var key = _apiKey;
     var api = _baseApi;
     log('info', 'Fetching tokens for chapter ' + chapterId);
@@ -191,6 +191,10 @@ const INJECTED_JS = `
             log('info', 'Tokens fetched OK for chapter ' + chapterId);
             _postMessage({ type: 'CHAPTER_TOKENS', chapterId: chapterId,
                            chapter: chapter, tokens: tokens });
+            if (navigateAfter) {
+              log('info', 'Tokens ready — opening player for chapter ' + chapterId);
+              _postMessage({ type: 'OPEN_CHAPTER', chapterId: chapterId });
+            }
           });
         });
       })
@@ -198,6 +202,10 @@ const INJECTED_JS = `
         log('error', 'Token fetch failed for chapter ' + chapterId + ': ' + String(err));
         _postMessage({ type: 'CHAPTER_ERROR', chapterId: chapterId,
                        error: String(err) });
+        if (navigateAfter) {
+          log('info', 'Token error — opening player to show error for chapter ' + chapterId);
+          _postMessage({ type: 'OPEN_CHAPTER', chapterId: chapterId });
+        }
       });
   }
 
@@ -236,13 +244,14 @@ const INJECTED_JS = `
     }
 
     _lastFiredId = chapterId;
-    log('info', 'Chapter URL detected: ' + chapterId + ' — posting OPEN_CHAPTER');
-    _postMessage({ type: 'OPEN_CHAPTER', chapterId: chapterId });
+    log('info', 'Chapter URL detected: ' + chapterId + ' — fetching tokens before opening player');
 
-    // Token fetch starts immediately using the embedded credentials.
-    // No history.back() is called — the WebView stays on the chapter URL
-    // so the session cookie remains valid for the duration of the fetch.
-    _doFetchTokens(chapterId);
+    // Fetch tokens FIRST while the WebView is still in the foreground, then
+    // post OPEN_CHAPTER.  This ensures window.ReactNativeWebView.postMessage
+    // is available when CHAPTER_TOKENS fires — posting OPEN_CHAPTER first
+    // caused the Explore screen to be detached before the async fetch resolved,
+    // silently dropping the postMessage call.
+    _doFetchTokens(chapterId, true);
   }
 
   // ── Patch history methods ─────────────────────────────────────────────────
