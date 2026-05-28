@@ -50,7 +50,6 @@ import {
   Pressable,
   StyleSheet,
   Text,
-  UIManager,
   useWindowDimensions,
   View,
 } from 'react-native';
@@ -72,38 +71,23 @@ import IcareOfflineDrm, {
 
 type Mode = 'loading' | 'online' | 'offline' | 'error' | 'webview-fallback';
 
-// ─── Native video availability guard ─────────────────────────────────────────
+// ─── Android online playback gate ────────────────────────────────────────────
 //
-// react-native-video 5.2.1 was built for the Old Architecture. On React Native
-// 0.76+ with New Architecture / Bridgeless enabled (IS_NEW_ARCH=true), the old
-// ViewManager registry (UIManager) is null, causing:
+// react-native-video 5.2.1 is Old Architecture only. On RN 0.76+ with New
+// Architecture / Bridgeless (IS_NEW_ARCH=true), UIManager.getViewManagerConfig
+// can return a false positive on some devices, then crash when <Video> actually
+// renders:
 //   TypeError: Cannot read property 'getViewManagerConfig' of null
-// at the moment <Video> is rendered.
 //
-// We detect this at module load time and cache the result so every render is
-// zero-cost. On iOS this always returns true (not affected by the same bridge).
-// On Android we guard defensively: if UIManager or its method is unavailable,
-// native video is considered unsafe.
+// Runtime UIManager probes are unreliable under Expo + New Arch. The only safe
+// approach is to NEVER render native Video on Android for online chapters.
+// Offline DRM playback is unaffected (continues to use native Video on all
+// platforms). iOS is unaffected.
 
-function isNativeVideoAvailable(): boolean {
-  try {
-    if (Platform.OS !== 'android') return true;
-    if (!UIManager || typeof UIManager.getViewManagerConfig !== 'function') {
-      return false;
-    }
-    const config =
-      UIManager.getViewManagerConfig('RCTVideo') ??
-      UIManager.getViewManagerConfig('Video');
-    return !!config;
-  } catch (e) {
-    console.warn('[player] native video availability check failed', e);
-    return false;
-  }
+const FORCE_ANDROID_WEBVIEW_PLAYER = Platform.OS === 'android';
+if (FORCE_ANDROID_WEBVIEW_PLAYER) {
+  console.log('[player] Android native Video intentionally disabled for stability');
 }
-
-// Evaluated once when the module loads — no per-render cost.
-const NATIVE_VIDEO_AVAILABLE = isNativeVideoAvailable();
-console.log(`[player] native video available: ${NATIVE_VIDEO_AVAILABLE} (platform: ${Platform.OS})`);
 
 // ─── Keep-awake hook (module-level) ──────────────────────────────────────────
 // Defined outside any component so it is always called unconditionally.
@@ -382,14 +366,16 @@ export default function ChapterPlayerScreen() {
           );
           setChapter(result.data.chapter);
           setTokens(result.data.tokens);
-          if (!NATIVE_VIDEO_AVAILABLE) {
-            // react-native-video 5.x is Old Architecture only; on RN 0.76+
-            // with New Architecture / Bridgeless, rendering <Video> crashes.
-            // Route to WebView fallback instead — user stays in Base44 player.
+          if (FORCE_ANDROID_WEBVIEW_PLAYER) {
+            // react-native-video 5.x is Old Architecture only. On RN 0.76+
+            // New Arch / Bridgeless, the native Video component crashes even
+            // when UIManager probes return a false positive. We permanently
+            // disable native Video on Android for online chapters — the
+            // Base44 WebView player handles playback instead.
             console.log(
-              '[player] native video unavailable on Android — using WebView fallback',
+              '[player] Android online playback forced to WebView fallback — native Video disabled',
             );
-            console.log('[player] android playback mode: webview-fallback');
+            console.log('[player] Android playback mode: webview-fallback');
             setMode('webview-fallback');
           } else {
             setMode('online');
@@ -564,7 +550,15 @@ export default function ChapterPlayerScreen() {
 
     console.log(`[player] Resuming online streaming for chapter ${chapterId}`);
     setTokens(result.data.tokens);
-    setMode('online');
+    if (FORCE_ANDROID_WEBVIEW_PLAYER) {
+      console.log(
+        '[player] Android online playback forced to WebView fallback — native Video disabled',
+      );
+      console.log('[player] Android playback mode: webview-fallback');
+      setMode('webview-fallback');
+    } else {
+      setMode('online');
+    }
   }, [chapter, chapterId]);
 
   // ── webview-fallback navigation ── (hook #17)
@@ -627,6 +621,22 @@ export default function ChapterPlayerScreen() {
   }
 
   // ── online / offline: delegate entirely to VideoPlayer child ──
+  // Belt-and-suspenders: Android online mode must NEVER reach VideoPlayer.
+  // Logically unreachable (mode is set to 'webview-fallback' not 'online' on
+  // Android in both the load effect and handleDeleteDownload), but we guard
+  // explicitly so a future code change cannot accidentally reintroduce the crash.
+  if (FORCE_ANDROID_WEBVIEW_PLAYER && mode === 'online') {
+    console.warn(
+      '[player] UNEXPECTED: Android online mode reached render — forcing webview-fallback',
+    );
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator size="large" />
+        <Text style={styles.muted}>Opening in browser…</Text>
+      </View>
+    );
+  }
+
   // source is non-null here because mode is 'online'|'offline' and useMemo
   // always produces a source value for those modes.
   return (
