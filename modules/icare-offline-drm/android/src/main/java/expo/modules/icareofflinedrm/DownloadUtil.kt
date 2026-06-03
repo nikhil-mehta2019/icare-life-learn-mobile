@@ -31,6 +31,10 @@ object DownloadUtil {
     val existing = downloadCache
     if (existing != null) return existing
     val dir = File(ctx.filesDir, DOWNLOAD_CONTENT_DIRECTORY)
+    // Belt-and-suspenders: prevent media scanner from indexing encrypted segments.
+    // filesDir is already excluded from MediaStore on Android 10+, but older devices
+    // and some OEM file managers may still scan it.
+    File(dir, ".nomedia").let { if (!it.exists()) it.createNewFile() }
     val cache = SimpleCache(dir, NoOpCacheEvictor(), getDatabaseProvider(ctx))
     downloadCache = cache
     return cache

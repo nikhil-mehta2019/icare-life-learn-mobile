@@ -1,41 +1,20 @@
 /**
- * player/[chapterId].tsx — hook-order-v2
+ * player/[chapterId].tsx — offline-learning-center upgrade
  *
- * Architecture: shell + child pattern to eliminate all hook-order violations.
+ * Architecture: shell + child pattern (hook-order-v2 preserved).
  *
- * ─── Component tree ───────────────────────────────────────────────────────────
- *
- *  ChapterPlayerScreen  (shell / parent)
- *    • All React hooks unconditionally at the top of the function.
- *    • No hook is ever called after a return statement.
- *    • Handles: params, mode state, token loading, offline check, keep-awake.
- *    • Renders: <LoadingView />, <ErrorView />, or <VideoPlayer />.
- *
- *  VideoPlayer  (child — only mounts when source is ready)
- *    • Contains all video-specific hooks: refs, gesture, audio-toast state.
- *    • Hooks inside a child component are fine; they execute in a stable order
- *      for the lifetime of that child, independent of the parent's mode state.
- *
- *  DownloadControls  (pure-ish functional child, no hooks)
- *
- * ─── Loading sequence ─────────────────────────────────────────────────────────
- *
- *  1. Check for an existing offline copy + DRM licence → play offline.
- *  2. Wait for tokens pre-fetched by the WebView bridge (max 20 s).
- *     The WebView has the user's session cookies; React Native's fetch() does
- *     not share the cookie jar on Android, so all authenticated API calls are
- *     routed through the WebView.
- *  3. If the bridge times out or returns an error, show an error screen.
- *
- * ─── Token refresh (download / delete-download) ───────────────────────────────
- *
- *  Both actions request fresh tokens via requestWebViewTokens() + waitForPlayerData().
- *  This ensures the authenticated session cookie is always used.
+ * New in this revision:
+ *   - Offline/online network detection (useNetworkStatus ping hook)
+ *   - "Playing downloaded content" banner when mode === 'offline'
+ *   - "Internet connection required" when device is offline and no download exists
+ *   - Watch-position persistence via offlineProgress store (fire-and-forget)
+ *   - Resume from last position on load
+ *   - Improved DownloadControls: "Download for Offline Viewing", "Downloaded ✓",
+ *     "Remove Download", "Go to Downloads"
+ *   - License renewal entry point when license is expired
  */
 
-// Build fingerprint — fires when Metro loads this module into the JS bundle.
-// Must appear in Logcat after installing the correct APK.
-console.log('[build] iCare player hotfix commit active: hook-order-v2');
+console.log('[build] iCare player offline-learning-center active');
 
 import { useIsFocused } from '@react-navigation/native';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
@@ -68,44 +47,45 @@ import IcareOfflineDrm, {
   type DownloadInfo,
   type OfflinePlaybackSource,
 } from '../../modules/icare-offline-drm';
+import { useNetworkStatus } from '../../hooks/useNetworkStatus';
+import {
+  saveProgress,
+  getProgress,
+  clearProgress,
+} from '../../store/offlineProgress';
 
-type Mode = 'loading' | 'online' | 'offline' | 'error' | 'webview-fallback';
+type Mode = 'loading' | 'online' | 'offline' | 'error' | 'webview-fallback' | 'no-internet';
 
 // ─── Android online playback gate ────────────────────────────────────────────
-//
-// react-native-video 5.2.1 is Old Architecture only. On RN 0.76+ with New
-// Architecture / Bridgeless (IS_NEW_ARCH=true), UIManager.getViewManagerConfig
-// can return a false positive on some devices, then crash when <Video> actually
-// renders:
-//   TypeError: Cannot read property 'getViewManagerConfig' of null
-//
-// Runtime UIManager probes are unreliable under Expo + New Arch. The only safe
-// approach is to NEVER render native Video on Android for online chapters.
-// Offline DRM playback is unaffected (continues to use native Video on all
-// platforms). iOS is unaffected.
+// react-native-video 5.2.1 is Old Architecture only; crashes on RN 0.76+ New Arch.
+// Online playback on Android is forced to the Base44 WebView player.
+// Offline DRM playback continues to use the native Video component on all platforms.
 
 const FORCE_ANDROID_WEBVIEW_PLAYER = Platform.OS === 'android';
-if (FORCE_ANDROID_WEBVIEW_PLAYER) {
-  console.log('[player] Android native Video intentionally disabled for stability');
+
+// ─── License status ──────────────────────────────────────────────────────────
+
+function isLicenseExpired(downloadedAt?: string | null): boolean {
+  if (!downloadedAt) return false;
+  try {
+    const ageMs = Date.now() - new Date(downloadedAt).getTime();
+    return ageMs > 30 * 24 * 60 * 60 * 1000;
+  } catch {
+    return false;
+  }
 }
 
-// ─── Keep-awake hook (module-level) ──────────────────────────────────────────
-// Defined outside any component so it is always called unconditionally.
-// Activates/deactivates the wake lock whenever shouldKeepAwake changes.
-// Guarantees deactivation on unmount via the released-guard cleanup.
+// ─── Keep-awake hook ─────────────────────────────────────────────────────────
 
-const CHAPTER_PLAYER_KEEP_AWAKE_TAG = 'icare-chapter-player';
+const KEEP_AWAKE_TAG = 'icare-chapter-player';
 
 function useChapterKeepAwake(shouldKeepAwake: boolean) {
   useEffect(() => {
     let released = false;
     async function apply() {
       try {
-        if (shouldKeepAwake) {
-          await activateKeepAwakeAsync(CHAPTER_PLAYER_KEEP_AWAKE_TAG);
-        } else {
-          await deactivateKeepAwake(CHAPTER_PLAYER_KEEP_AWAKE_TAG);
-        }
+        if (shouldKeepAwake) await activateKeepAwakeAsync(KEEP_AWAKE_TAG);
+        else await deactivateKeepAwake(KEEP_AWAKE_TAG);
       } catch (e) {
         console.warn('[player] keep-awake update failed', e);
       }
@@ -114,21 +94,37 @@ function useChapterKeepAwake(shouldKeepAwake: boolean) {
     return () => {
       if (!released) {
         released = true;
-        deactivateKeepAwake(CHAPTER_PLAYER_KEEP_AWAKE_TAG).catch((e) => {
-          console.warn('[player] keep-awake cleanup failed', e);
-        });
+        deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => {});
       }
     };
   }, [shouldKeepAwake]);
 }
 
-// ─── VideoPlayer child component ──────────────────────────────────────────────
-// All video-specific hooks live here. This component is only rendered when the
-// parent shell has a ready source (mode === 'online' | 'offline'), so its own
-// hooks always run in exactly the same order for its entire lifetime.
-//
-// Conditional rendering of child components is 100% valid — React's hook rules
-// only apply within a SINGLE component's render path.
+// ─── Offline banner ──────────────────────────────────────────────────────────
+
+function OfflineBanner({ message }: { message: string }) {
+  return (
+    <View style={bannerStyles.banner}>
+      <Text style={bannerStyles.icon}>📥</Text>
+      <Text style={bannerStyles.text}>{message}</Text>
+    </View>
+  );
+}
+
+const bannerStyles = StyleSheet.create({
+  banner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#1D3D47',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    gap: 8,
+  },
+  icon: { fontSize: 14 },
+  text: { color: '#fff', fontSize: 12, fontWeight: '500', flex: 1 },
+});
+
+// ─── VideoPlayer child ────────────────────────────────────────────────────────
 
 interface VideoPlayerProps {
   source: ReactVideoSource;
@@ -138,8 +134,10 @@ interface VideoPlayerProps {
   offline: OfflinePlaybackSource | null;
   download: DownloadInfo | null;
   chapterId: string;
+  initialPositionSeconds: number;
   onDownload: () => void;
   onDelete: () => void;
+  onGoToDownloads: () => void;
 }
 
 function VideoPlayer({
@@ -150,32 +148,39 @@ function VideoPlayer({
   offline,
   download,
   chapterId,
+  initialPositionSeconds,
   onDownload,
   onDelete,
+  onGoToDownloads,
 }: VideoPlayerProps) {
-  // ── hooks ── (all unconditional, no early returns in this component)
   const videoRef = useRef<VideoRef>(null);
   const { width } = useWindowDimensions();
   const [isFullscreen, setIsFullscreen] = useState(false);
-  // Peak scale tracked across the pinch gesture — Android MediaController
-  // intercepts touches so onEnd scale is often 1.0; track the max instead.
   const peakScale = useRef(1);
   const [audioToastVisible, setAudioToastVisible] = useState(false);
   const audioToastOpacity = useRef(new Animated.Value(0)).current;
+  const durationRef = useRef(-1);
+  const lastSavedPosition = useRef(0);
+  const hasSeekedToResume = useRef(false);
 
   const handleVideoLoad = useCallback(
     async (data: any) => {
-      // Re-activate in case the OS dropped the wake lock during initial load.
-      activateKeepAwakeAsync(CHAPTER_PLAYER_KEEP_AWAKE_TAG);
+      activateKeepAwakeAsync(KEEP_AWAKE_TAG);
+      durationRef.current = data?.duration ?? -1;
+
+      // Seek to last-watched position (only once per mount)
+      if (!hasSeekedToResume.current && initialPositionSeconds > 5) {
+        hasSeekedToResume.current = true;
+        videoRef.current?.seek(initialPositionSeconds);
+      }
+
       const tracks: any[] = data?.audioTracks ?? [];
       if (tracks.length <= 1) return;
       try {
         const seen = await getItemAsync('audio_lang_hint_shown');
         if (seen) return;
         await setItemAsync('audio_lang_hint_shown', '1');
-      } catch {
-        // SecureStore unavailable — show toast anyway
-      }
+      } catch {}
       setAudioToastVisible(true);
       Animated.sequence([
         Animated.timing(audioToastOpacity, { toValue: 1, duration: 300, useNativeDriver: true }),
@@ -183,21 +188,43 @@ function VideoPlayer({
         Animated.timing(audioToastOpacity, { toValue: 0, duration: 400, useNativeDriver: true }),
       ]).start(() => setAudioToastVisible(false));
     },
-    [audioToastOpacity],
+    [audioToastOpacity, initialPositionSeconds],
   );
 
-  // onPlaybackRateChange is the correct v5.2.1 callback for play/pause state.
-  const handlePlaybackRateChange = useCallback(
-    ({ playbackRate }: { playbackRate: number }) => {
-      console.log(`[player] Playback rate: ${playbackRate}`);
+  const handleProgress = useCallback(
+    (data: { currentTime: number; playableDuration: number; seekableDuration: number }) => {
+      const pos = data.currentTime;
+      // Save every 10 seconds to avoid excessive I/O
+      if (pos - lastSavedPosition.current < 10) return;
+      lastSavedPosition.current = pos;
+      const dur = durationRef.current;
+      const pct = dur > 0 ? (pos / dur) * 100 : 0;
+      saveProgress({
+        chapterId,
+        watchedSeconds: pos,
+        durationSeconds: dur,
+        percentWatched: pct,
+        lastWatchedAt: new Date().toISOString(),
+      }).catch(() => {});
     },
-    [],
+    [chapterId],
   );
 
-  // ── pinch-to-fullscreen gesture ──
-  // Track PEAK scale via onUpdate (not onEnd) because Android's MediaController
-  // intercepts touch events and the final scale is often back near 1.0.
-  // Gesture overlay sits ABOVE the Video so RNGH receives pinch events first.
+  const handleEnd = useCallback(() => {
+    console.log('[player] Playback ended');
+    // Mark as fully watched
+    const dur = durationRef.current;
+    if (dur > 0) {
+      saveProgress({
+        chapterId,
+        watchedSeconds: dur,
+        durationSeconds: dur,
+        percentWatched: 100,
+        lastWatchedAt: new Date().toISOString(),
+      }).catch(() => {});
+    }
+  }, [chapterId]);
+
   const pinchGesture = Gesture.Pinch()
     .runOnJS(true)
     .onStart(() => { peakScale.current = 1; })
@@ -206,11 +233,9 @@ function VideoPlayer({
       const peak = peakScale.current;
       peakScale.current = 1;
       if (peak > 1.1 && !isFullscreen) {
-        console.log(`[player] Pinch-out (peak ${peak.toFixed(2)}) — entering fullscreen`);
         setIsFullscreen(true);
         videoRef.current?.presentFullscreenPlayer();
       } else if (peak < 0.9 && isFullscreen) {
-        console.log(`[player] Pinch-in (peak ${peak.toFixed(2)}) — exiting fullscreen`);
         setIsFullscreen(false);
         videoRef.current?.dismissFullscreenPlayer();
       }
@@ -227,27 +252,17 @@ function VideoPlayer({
           drm={drm as any}
           controls
           resizeMode="contain"
+          progressUpdateInterval={1000}
           onLoad={handleVideoLoad}
-          onReadyForDisplay={() => {
-            activateKeepAwakeAsync(CHAPTER_PLAYER_KEEP_AWAKE_TAG);
-          }}
-          onFullscreenPlayerWillPresent={() => {
-            activateKeepAwakeAsync(CHAPTER_PLAYER_KEEP_AWAKE_TAG);
-          }}
-          onFullscreenPlayerDidPresent={() => {
-            activateKeepAwakeAsync(CHAPTER_PLAYER_KEEP_AWAKE_TAG);
-          }}
-          onFullscreenPlayerWillDismiss={() => {
-            activateKeepAwakeAsync(CHAPTER_PLAYER_KEEP_AWAKE_TAG);
-          }}
+          onProgress={handleProgress}
+          onEnd={handleEnd}
+          onReadyForDisplay={() => activateKeepAwakeAsync(KEEP_AWAKE_TAG)}
+          onFullscreenPlayerWillPresent={() => activateKeepAwakeAsync(KEEP_AWAKE_TAG)}
+          onFullscreenPlayerDidPresent={() => activateKeepAwakeAsync(KEEP_AWAKE_TAG)}
+          onFullscreenPlayerWillDismiss={() => activateKeepAwakeAsync(KEEP_AWAKE_TAG)}
           onFullscreenPlayerDidDismiss={() => {
-            console.log('[player] Fullscreen dismissed');
             setIsFullscreen(false);
-            activateKeepAwakeAsync(CHAPTER_PLAYER_KEEP_AWAKE_TAG);
-          }}
-          onPlaybackRateChange={handlePlaybackRateChange}
-          onEnd={() => {
-            console.log('[player] Playback ended');
+            activateKeepAwakeAsync(KEEP_AWAKE_TAG);
           }}
           style={StyleSheet.absoluteFill}
           onError={(e: any) => {
@@ -256,48 +271,38 @@ function VideoPlayer({
             Alert.alert('Playback error', detail);
           }}
         />
-
-        {/* Transparent overlay above Video so RNGH receives pinch events
-            before the native MediaController can swallow them.
-            pointerEvents="box-none" lets single taps pass through to controls. */}
         <GestureDetector gesture={pinchGesture}>
-          <View
-            style={[StyleSheet.absoluteFill, styles.pinchOverlay]}
-            pointerEvents="box-none"
-          />
+          <View style={[StyleSheet.absoluteFill, styles.pinchOverlay]} pointerEvents="box-none" />
         </GestureDetector>
-
         {audioToastVisible && (
           <Animated.View style={[styles.audioToast, { opacity: audioToastOpacity }]}>
             <Text style={styles.audioToastText}>
               Multiple audio languages available. Select your preferred language from player settings.
             </Text>
-            <Pressable
-              onPress={() => {
-                audioToastOpacity.setValue(0);
-                setAudioToastVisible(false);
-              }}
-            >
+            <Pressable onPress={() => { audioToastOpacity.setValue(0); setAudioToastVisible(false); }}>
               <Text style={styles.audioToastDismiss}>✕</Text>
             </Pressable>
           </Animated.View>
         )}
       </View>
 
+      {/* Offline banner */}
+      {mode === 'offline' && (
+        <OfflineBanner message="Playing downloaded content" />
+      )}
+
       <View style={styles.metaRow}>
-        <Text style={styles.title} numberOfLines={2}>
-          {chapter?.title ?? 'Lesson'}
-        </Text>
-        <Text style={styles.badge}>
-          {mode === 'offline' ? 'Offline' : 'Streaming'}
-        </Text>
+        <Text style={styles.title} numberOfLines={2}>{chapter?.title ?? 'Lesson'}</Text>
+        <Text style={styles.badge}>{mode === 'offline' ? 'Offline' : 'Streaming'}</Text>
       </View>
 
       <DownloadControls
         download={download}
         offline={!!offline}
+        offlineDownload={download}
         onDownload={onDownload}
         onDelete={onDelete}
+        onGoToDownloads={onGoToDownloads}
       />
     </GestureHandlerRootView>
   );
@@ -306,42 +311,41 @@ function VideoPlayer({
 // ─── ChapterPlayerScreen (shell / parent) ─────────────────────────────────────
 //
 // INVARIANT: every hook in this function is called on EVERY render.
-//            No hook appears after any return statement.
-//            All early returns (loading / error) are placed AFTER the last hook.
 
 export default function ChapterPlayerScreen() {
-  // ── params ── (hooks #1-3)
   const { chapterId } = useLocalSearchParams<{ chapterId: string }>();
   const router = useRouter();
   const isFocused = useIsFocused();
+  const { isOnline } = useNetworkStatus();
 
-  // ── state ── (hooks #4-9)
   const [mode, setMode] = useState<Mode>('loading');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [chapter, setChapter] = useState<Chapter | null>(null);
   const [tokens, setTokens] = useState<MuxTokenResponse | null>(null);
   const [offline, setOffline] = useState<OfflinePlaybackSource | null>(null);
   const [download, setDownload] = useState<DownloadInfo | null>(null);
+  const [initialPositionSeconds, setInitialPositionSeconds] = useState(0);
 
-  // ── initial load effect ── (hook #10)
+  // ── initial load ──
   useEffect(() => {
     let cancelled = false;
-    // cancelWait() clears our resolver from playerCache immediately on unmount,
-    // preventing the 20 s timer from firing setState on an unmounted component.
     let cancelWait: (() => void) | null = null;
 
     (async () => {
       try {
         if (!chapterId) throw new Error('Missing chapterId');
-        console.log(`[player] HOTFIX BUILD: hook-order-v2 active`, { chapterId });
-        console.log(`[player] Mounting for chapter ${chapterId}`);
 
-        // 1) Check for an existing offline copy + license.
+        // 1) Restore last-watched position
+        const savedProg = await getProgress(chapterId);
+        if (!cancelled && savedProg && savedProg.watchedSeconds > 5) {
+          setInitialPositionSeconds(savedProg.watchedSeconds);
+        }
+
+        // 2) Check for offline copy
         const off = await IcareOfflineDrm.getOfflineSource({ id: chapterId });
         if (cancelled) return;
 
         if (off) {
-          console.log(`[player] Offline copy found for chapter ${chapterId}`);
           const ch = await fetchChapter(chapterId);
           if (cancelled) return;
           setChapter(ch.data);
@@ -350,9 +354,9 @@ export default function ChapterPlayerScreen() {
           return;
         }
 
-        // 2) Wait for tokens from the WebView bridge (authenticated).
-        //    The WebView has the user's session cookie; native fetch() does not.
-        console.log(`[player] No offline copy — requesting tokens from WebView bridge`);
+        // 3) No offline copy — check network before waiting for tokens
+        // isOnline can be null (not yet checked). Proceed optimistically.
+        // The token wait will handle the timeout case.
         const handle = waitForPlayerData(chapterId);
         cancelWait = handle.cancel;
 
@@ -361,21 +365,9 @@ export default function ChapterPlayerScreen() {
         cancelWait = null;
 
         if (result.ok) {
-          console.log(
-            `[player] Tokens received for chapter ${chapterId} — starting playback`,
-          );
           setChapter(result.data.chapter);
           setTokens(result.data.tokens);
           if (FORCE_ANDROID_WEBVIEW_PLAYER) {
-            // react-native-video 5.x is Old Architecture only. On RN 0.76+
-            // New Arch / Bridgeless, the native Video component crashes even
-            // when UIManager probes return a false positive. We permanently
-            // disable native Video on Android for online chapters — the
-            // Base44 WebView player handles playback instead.
-            console.log(
-              '[player] Android online playback forced to WebView fallback — native Video disabled',
-            );
-            console.log('[player] Android playback mode: webview-fallback');
             setMode('webview-fallback');
           } else {
             setMode('online');
@@ -383,56 +375,49 @@ export default function ChapterPlayerScreen() {
           return;
         }
 
-        // 3) Bridge returned an error or timed out.
-        //    Common values:
-        //      "Timed out after 20s…" → bridge not firing
-        //      "getMuxToken failed (401)" → session expired
-        console.warn(`[player] Bridge error for chapter ${chapterId}: ${result.error}`);
+        // 4) Bridge failed — if we know device is offline and there's no download,
+        //    show the "no internet" screen instead of a generic error.
+        if (isOnline === false) {
+          setMode('no-internet');
+          return;
+        }
+
         throw new Error(result.error);
       } catch (err: any) {
         if (cancelled) return;
         const msg = err?.message ?? String(err);
-        console.error(`[player] Load error for chapter ${chapterId}: ${msg}`);
         setErrorMsg(msg);
-        setMode('error');
+        // If we know device is offline, show the friendly no-internet screen
+        if (isOnline === false) {
+          setMode('no-internet');
+        } else {
+          setMode('error');
+        }
       }
     })();
 
     return () => {
       cancelled = true;
-      if (cancelWait) {
-        cancelWait();
-        cancelWait = null;
-      }
-      console.log(`[player] Unmounting — cleanup complete for chapter ${chapterId}`);
+      if (cancelWait) { cancelWait(); cancelWait = null; }
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chapterId]);
 
-  // ── download progress subscription ── (hook #11)
+  // ── download progress subscription ──
   useEffect(() => {
     if (!chapterId) return;
     const sub = onDownloadProgress((evt) => {
-      if (evt.id === chapterId) {
-        console.log(
-          `[player] Download progress for chapter ${chapterId}: ${evt.percentDownloaded}%`,
-        );
-        setDownload(evt);
-      }
+      if (evt.id === chapterId) setDownload(evt);
     });
-    IcareOfflineDrm.getDownload(chapterId).then((d) => {
-      if (d) setDownload(d);
-    });
+    IcareOfflineDrm.getDownload(chapterId).then((d) => { if (d) setDownload(d); });
     return () => sub.remove();
   }, [chapterId]);
 
-  // ── keep-awake: active while screen is focused and video is loaded ── (hook #12)
-  // Uses mode rather than isPlaying so the screen stays awake immediately when
-  // tokens arrive — before the first playback frame — and remains awake even
-  // when the video is paused (intentional; user is still watching the screen).
+  // ── keep-awake ──
   const shouldKeepAwake = isFocused && (mode === 'online' || mode === 'offline');
   useChapterKeepAwake(shouldKeepAwake);
 
-  // ── video source ── (hook #13)
+  // ── video source ──
   const source: ReactVideoSource | null = useMemo(() => {
     if (mode === 'offline' && offline) {
       return { uri: offline.uri, type: 'm3u8', cacheKey: offline.cacheKey } as ReactVideoSource;
@@ -443,7 +428,7 @@ export default function ChapterPlayerScreen() {
     return null;
   }, [mode, offline, tokens]);
 
-  // ── DRM config ── (hook #14)
+  // ── DRM config ──
   const drm = useMemo(() => {
     if (mode === 'offline' && offline) {
       return { type: 'widevine' as DRMType, offlineLicense: offline.offlineLicenseKeySetId };
@@ -458,18 +443,12 @@ export default function ChapterPlayerScreen() {
     return undefined;
   }, [mode, offline, tokens]);
 
-  // ── download handler ── (hook #15)
-  /**
-   * Request a fresh token via the WebView bridge, then start the download.
-   * Avoids calling getMuxToken() natively (which fails with 401 on Android
-   * because React Native's fetch() does not share the WebView cookie jar).
-   */
+  // ── download handler ──
   const handleDownload = useCallback(async () => {
     if (!chapter || !chapterId) return;
     const playbackId = selectMuxPlaybackId(chapter);
     if (!playbackId) return;
 
-    console.log(`[player] Requesting download tokens for chapter ${chapterId}`);
     const dispatched = requestWebViewTokens(chapterId);
     if (!dispatched) {
       Alert.alert('Download failed', 'Please return to the course page and try again.');
@@ -480,16 +459,12 @@ export default function ChapterPlayerScreen() {
     const result = await handle.promise;
 
     if (!result.ok) {
-      console.warn(
-        `[player] Download token fetch failed for chapter ${chapterId}: ${result.error}`,
-      );
       Alert.alert('Download failed', result.error);
       return;
     }
 
     try {
       const tk = result.data.tokens;
-      console.log(`[player] Starting download for chapter ${chapterId}`);
       await IcareOfflineDrm.startDownload({
         id: chapterId,
         manifestUrl: tk.secureStreamUrl,
@@ -498,22 +473,15 @@ export default function ChapterPlayerScreen() {
         title: chapter.title,
       });
     } catch (err: any) {
-      console.error(
-        `[player] Download start failed for chapter ${chapterId}: ${err?.message}`,
-      );
       Alert.alert('Download failed', err?.message ?? String(err));
     }
   }, [chapter, chapterId]);
 
-  // ── delete-download handler ── (hook #16)
-  /**
-   * Remove the offline copy, then re-fetch tokens via the WebView bridge to
-   * resume online streaming. Avoids the native getMuxToken() 401 issue.
-   */
+  // ── delete-download handler ──
   const handleDeleteDownload = useCallback(async () => {
     if (!chapterId) return;
-    console.log(`[player] Deleting download for chapter ${chapterId}`);
     await IcareOfflineDrm.removeDownload(chapterId);
+    await clearProgress(chapterId);
     setDownload(null);
     setOffline(null);
 
@@ -524,14 +492,9 @@ export default function ChapterPlayerScreen() {
     }
 
     setMode('loading');
-    console.log(
-      `[player] Requesting fresh tokens after download deletion for chapter ${chapterId}`,
-    );
     const dispatched = requestWebViewTokens(chapterId);
     if (!dispatched) {
-      setErrorMsg(
-        'Please return to the course page and tap the chapter again to resume streaming.',
-      );
+      setErrorMsg('Please return to the course page and tap the chapter again.');
       setMode('error');
       return;
     }
@@ -540,51 +503,33 @@ export default function ChapterPlayerScreen() {
     const result = await handle.promise;
 
     if (!result.ok) {
-      console.warn(
-        `[player] Token refresh failed after download deletion for chapter ${chapterId}: ${result.error}`,
-      );
       setErrorMsg(`Could not resume streaming: ${result.error}`);
       setMode('error');
       return;
     }
 
-    console.log(`[player] Resuming online streaming for chapter ${chapterId}`);
     setTokens(result.data.tokens);
     if (FORCE_ANDROID_WEBVIEW_PLAYER) {
-      console.log(
-        '[player] Android online playback forced to WebView fallback — native Video disabled',
-      );
-      console.log('[player] Android playback mode: webview-fallback');
       setMode('webview-fallback');
     } else {
       setMode('online');
     }
   }, [chapter, chapterId]);
 
-  // ── webview-fallback navigation ── (hook #17)
-  // When native Video is unavailable on this device (react-native-video 5.x is
-  // Old Architecture only; RN 0.76+ forces New Architecture / Bridgeless which
-  // nulls the ViewManager registry), navigate back immediately so the Base44
-  // WebView player handles playback instead of crashing.
-  // Short delay (100 ms) lets React commit the render before navigation fires.
+  // ── Go to downloads ──
+  const handleGoToDownloads = useCallback(() => {
+    router.push('/(tabs)/downloads' as any);
+  }, [router]);
+
+  // ── webview-fallback navigation ──
   useEffect(() => {
     if (mode !== 'webview-fallback') return;
-    const timer = setTimeout(() => {
-      router.back();
-    }, 100);
+    const timer = setTimeout(() => router.back(), 100);
     return () => clearTimeout(timer);
   }, [mode, router]);
 
-  // ── ALL HOOKS ABOVE THIS LINE ─────────────────────────────────────────────
-  // Render state log — confirms hook-order-v2 is active and shows current state.
-  console.log('[player] render state', {
-    chapterId,
-    mode,
-    hasTokens: !!tokens,
-    hasOfflineSource: !!offline,
-  });
+  // ── ALL HOOKS ABOVE ───────────────────────────────────────────────────────
 
-  // ── loading ──
   if (mode === 'loading') {
     return (
       <View style={styles.center}>
@@ -594,10 +539,6 @@ export default function ChapterPlayerScreen() {
     );
   }
 
-  // ── webview-fallback ──
-  // react-native-video 5.x is not compatible with New Architecture (RN 0.76+).
-  // Show a brief spinner while useEffect navigates back to the Base44 WebView
-  // player (100 ms). User sees this for only one frame on Android New Arch.
   if (mode === 'webview-fallback') {
     return (
       <View style={styles.center}>
@@ -607,7 +548,25 @@ export default function ChapterPlayerScreen() {
     );
   }
 
-  // ── error ──
+  if (mode === 'no-internet') {
+    return (
+      <View style={styles.center}>
+        <Text style={styles.noInternetIcon}>📡</Text>
+        <Text style={styles.noInternetTitle}>Internet connection required</Text>
+        <Text style={styles.muted}>
+          This lesson hasn't been downloaded for offline use.{'\n'}
+          Connect to the internet to watch this lesson.
+        </Text>
+        <Pressable style={[styles.btn, { marginTop: 8 }]} onPress={() => router.back()}>
+          <Text style={styles.btnText}>Go back</Text>
+        </Pressable>
+        <Pressable style={[styles.btn, styles.btnSecondary, { marginTop: 4 }]} onPress={handleGoToDownloads}>
+          <Text style={[styles.btnText, { color: '#1D3D47' }]}>View Downloads</Text>
+        </Pressable>
+      </View>
+    );
+  }
+
   if (mode === 'error') {
     return (
       <View style={styles.center}>
@@ -620,15 +579,7 @@ export default function ChapterPlayerScreen() {
     );
   }
 
-  // ── online / offline: delegate entirely to VideoPlayer child ──
-  // Belt-and-suspenders: Android online mode must NEVER reach VideoPlayer.
-  // Logically unreachable (mode is set to 'webview-fallback' not 'online' on
-  // Android in both the load effect and handleDeleteDownload), but we guard
-  // explicitly so a future code change cannot accidentally reintroduce the crash.
   if (FORCE_ANDROID_WEBVIEW_PLAYER && mode === 'online') {
-    console.warn(
-      '[player] UNEXPECTED: Android online mode reached render — forcing webview-fallback',
-    );
     return (
       <View style={styles.center}>
         <ActivityIndicator size="large" />
@@ -637,8 +588,6 @@ export default function ChapterPlayerScreen() {
     );
   }
 
-  // source is non-null here because mode is 'online'|'offline' and useMemo
-  // always produces a source value for those modes.
   return (
     <VideoPlayer
       source={source!}
@@ -648,8 +597,10 @@ export default function ChapterPlayerScreen() {
       offline={offline}
       download={download}
       chapterId={chapterId ?? ''}
+      initialPositionSeconds={initialPositionSeconds}
       onDownload={handleDownload}
       onDelete={handleDeleteDownload}
+      onGoToDownloads={handleGoToDownloads}
     />
   );
 }
@@ -659,51 +610,70 @@ export default function ChapterPlayerScreen() {
 function DownloadControls({
   download,
   offline,
+  offlineDownload,
   onDownload,
   onDelete,
+  onGoToDownloads,
 }: {
   download: DownloadInfo | null;
   offline: boolean;
+  offlineDownload: DownloadInfo | null;
   onDownload: () => void;
   onDelete: () => void;
+  onGoToDownloads: () => void;
 }) {
+  const licExpired = isLicenseExpired(offlineDownload?.downloadedAt);
+
   if (offline || download?.state === 'completed') {
     return (
       <View style={styles.actionRow}>
-        <Text style={styles.muted}>Downloaded for offline playback</Text>
-        <Pressable style={[styles.btn, styles.btnDanger]} onPress={onDelete}>
-          <Text style={styles.btnText}>Remove download</Text>
+        <View style={styles.downloadedRow}>
+          <Text style={styles.downloadedLabel}>Downloaded ✓</Text>
+        </View>
+        <View style={styles.actionBtnRow}>
+          <Pressable style={[styles.btn, styles.btnSecondary]} onPress={onGoToDownloads}>
+            <Text style={[styles.btnText, { color: '#1D3D47' }]}>Go To Downloads</Text>
+          </Pressable>
+          <Pressable style={[styles.btn, styles.btnDanger]} onPress={onDelete}>
+            <Text style={styles.btnText}>Remove Download</Text>
+          </Pressable>
+        </View>
+        {licExpired && (
+          <Text style={styles.licWarn}>
+            ⚠ Offline license expired. Open the chapter online to renew.
+          </Text>
+        )}
+      </View>
+    );
+  }
+
+  if (download && (download.state === 'downloading' || download.state === 'queued')) {
+    const pct = download.percentDownloaded >= 0 ? `${Math.round(download.percentDownloaded)}%` : '…';
+    return (
+      <View style={styles.actionRow}>
+        <Text style={styles.muted}>Downloading {pct}</Text>
+        <Pressable style={[styles.btn, styles.btnSecondary]} onPress={onGoToDownloads}>
+          <Text style={[styles.btnText, { color: '#1D3D47' }]}>Go To Downloads</Text>
         </Pressable>
       </View>
     );
   }
-  if (download && (download.state === 'downloading' || download.state === 'queued')) {
-    const pct =
-      download.percentDownloaded >= 0
-        ? `${Math.round(download.percentDownloaded)}%`
-        : '…';
-    return (
-      <View style={styles.actionRow}>
-        <Text style={styles.muted}>Downloading {pct}</Text>
-      </View>
-    );
-  }
+
   if (download?.state === 'failed') {
     return (
       <View style={styles.actionRow}>
-        <Text style={styles.error}>
-          Download failed: {download.failureReason ?? 'unknown'}
-        </Text>
+        <Text style={styles.error}>Download failed: {download.failureReason ?? 'unknown'}</Text>
         <Pressable style={styles.btn} onPress={onDownload}>
           <Text style={styles.btnText}>Retry</Text>
         </Pressable>
       </View>
     );
   }
+
   return (
     <View style={styles.actionRow}>
-      <Pressable style={styles.btn} onPress={onDownload}>
-        <Text style={styles.btnText}>Download for offline</Text>
+      <Pressable style={[styles.btn, styles.btnDownload]} onPress={onDownload}>
+        <Text style={styles.btnText}>⬇  Download for Offline Viewing</Text>
       </Pressable>
     </View>
   );
@@ -726,17 +696,34 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     backgroundColor: 'rgba(255,255,255,0.15)',
   },
-  actionRow: { padding: 12, gap: 8, alignItems: 'flex-start' },
+  actionRow: { padding: 12, gap: 8 },
+  actionBtnRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  downloadedRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  downloadedLabel: { color: '#4CAF50', fontSize: 14, fontWeight: '600' },
+  licWarn: { color: '#FFD54F', fontSize: 12, marginTop: 4 },
   btn: {
     backgroundColor: '#1D3D47',
     paddingHorizontal: 14,
     paddingVertical: 10,
     borderRadius: 8,
+    alignSelf: 'flex-start',
   },
-  btnDanger: { backgroundColor: '#a33b3b' },
-  btnText: { color: '#fff', fontWeight: '600' },
+  btnSecondary: {
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.25)',
+  },
+  btnDownload: {
+    backgroundColor: '#1D3D47',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  btnDanger: { backgroundColor: 'rgba(163,59,59,0.8)' },
+  btnText: { color: '#fff', fontWeight: '600', fontSize: 13 },
   muted: { color: 'rgba(255,255,255,0.6)', fontSize: 13 },
   error: { color: '#f88', fontSize: 14 },
+  noInternetIcon: { fontSize: 40, marginBottom: 8 },
+  noInternetTitle: { fontSize: 18, fontWeight: '700', color: '#fff', textAlign: 'center' },
   audioToast: {
     position: 'absolute',
     bottom: 16,

@@ -13,12 +13,15 @@ export type DownloadState =
   | 'stopped';
 
 export interface DownloadInfo {
-  id: string;                 // chapterId — used as the download key
+  id: string;                  // chapterId — used as the download key
   state: DownloadState;
   bytesDownloaded: number;
-  contentLength: number;      // -1 if unknown
-  percentDownloaded: number;  // 0..100, -1 if unknown
+  contentLength: number;       // -1 if unknown
+  percentDownloaded: number;   // 0..100, -1 if unknown
   failureReason?: string | null;
+  // ── enriched fields (set by Kotlin toMap) ──
+  title?: string | null;       // human-readable chapter title
+  downloadedAt?: string | null; // ISO-8601 timestamp when download completed
 }
 
 export interface StartDownloadParams {
@@ -47,6 +50,11 @@ export interface OfflinePlaybackSource {
   uri: string;
   /** Stored Widevine offline license keySetId (base64). */
   offlineLicenseKeySetId: string;
+}
+
+export interface StorageStats {
+  usedBytes: number;
+  downloadCount: number;
 }
 
 // ----- Native module wrapper -------------------------------------------
@@ -117,6 +125,12 @@ export const IcareOfflineDrm = {
   ): Promise<void> {
     ensureAndroid('renewOfflineLicense');
     return NativeModule.renewOfflineLicense(id, drmLicenseUrl, drmToken);
+  },
+
+  /** Returns total bytes used by downloaded content + count of completed downloads. */
+  async getStorageStats(): Promise<StorageStats> {
+    if (Platform.OS !== 'android') return { usedBytes: 0, downloadCount: 0 };
+    return NativeModule.getStorageStats();
   },
 };
 

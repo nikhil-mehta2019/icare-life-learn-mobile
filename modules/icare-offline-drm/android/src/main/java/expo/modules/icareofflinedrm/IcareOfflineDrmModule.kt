@@ -12,6 +12,10 @@ import expo.modules.kotlin.modules.ModuleDefinition
 import expo.modules.kotlin.records.Field
 import expo.modules.kotlin.records.Record
 import java.io.Serializable
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 
 class StartDownloadParamsRecord : Record, Serializable {
   @Field var id: String = ""
@@ -34,7 +38,6 @@ class IcareOfflineDrmModule : Module() {
     Events("onDownloadProgress")
 
     OnCreate {
-      // Wire the singleton emitter so the DownloadService can push events back.
       DownloadEventBridge.emitter = { info ->
         sendEvent("onDownloadProgress", info)
       }
@@ -49,7 +52,12 @@ class IcareOfflineDrmModule : Module() {
         val ctx = appContext.reactContext
           ?: throw CodedException("ENO_CONTEXT", "Android context unavailable", null)
 
-        // 1) Acquire the offline Widevine license + persist its keySetId.
+        // 1) Persist the human title so downloads list can show it without a network call.
+        if (!params.title.isNullOrBlank()) {
+          DownloadMetadata.saveTitle(ctx, params.id, params.title!!)
+        }
+
+        // 2) Acquire the offline Widevine license + persist its keySetId.
         OfflineLicenseManager.acquireAndStore(
           ctx,
           downloadId = params.id,
@@ -58,7 +66,7 @@ class IcareOfflineDrmModule : Module() {
           licenseToken = params.drmToken,
         )
 
-        // 2) Build the download request (HLS by default — Mux returns m3u8).
+        // 3) Build the download request (HLS — Mux returns m3u8).
         val helper = DownloadUtil.getDownloadHelper(
           ctx,
           mediaItemId = params.id,
@@ -78,7 +86,7 @@ class IcareOfflineDrmModule : Module() {
         val downloadRequest: DownloadRequest = helper.getDownloadRequest(params.id, null)
         helper.release()
 
-        // 3) Hand off to the DownloadService.
+        // 4) Hand off to the DownloadService.
         DownloadService.sendAddDownload(
           ctx,
           OfflineDownloadService::class.java,
@@ -123,6 +131,8 @@ class IcareOfflineDrmModule : Module() {
         /* foreground = */ false,
       )
       OfflineLicenseManager.release(ctx, id)
+      DownloadMetadata.removeTitle(ctx, id)
+      DownloadMetadata.removeCompletedAt(ctx, id)
     }
 
     AsyncFunction("listDownloads") { promise: expo.modules.kotlin.Promise ->
@@ -134,7 +144,7 @@ class IcareOfflineDrmModule : Module() {
           DownloadUtil.getDownloadManager(ctx).downloadIndex.getDownloads()
         cursor.use {
           while (cursor.moveToNext()) {
-            out.add(toMap(cursor.download))
+            out.add(toMap(ctx, cursor.download))
           }
         }
         promise.resolve(out)
@@ -148,7 +158,7 @@ class IcareOfflineDrmModule : Module() {
         val ctx = appContext.reactContext
           ?: throw CodedException("ENO_CONTEXT", "Android context unavailable", null)
         val d = DownloadUtil.getDownloadManager(ctx).downloadIndex.getDownload(id)
-        promise.resolve(d?.let { toMap(it) })
+        promise.resolve(d?.let { toMap(ctx, it) })
       } catch (e: Throwable) {
         promise.reject("EGET_FAILED", e.message ?: "Unknown error", e)
       }
@@ -166,7 +176,6 @@ class IcareOfflineDrmModule : Module() {
         }
         val keySetIdB64 = OfflineLicenseManager.getKeySetIdB64(ctx, params.id)
         if (keySetIdB64 == null) {
-          // No persisted offline license — caller should renew or re-download.
           promise.resolve(null)
           return@AsyncFunction
         }
@@ -201,9 +210,33 @@ class IcareOfflineDrmModule : Module() {
         promise.reject("ERENEW_FAILED", e.message ?: "Unknown error", e)
       }
     }
+
+    AsyncFunction("getStorageStats") { promise: expo.modules.kotlin.Promise ->
+      try {
+        val ctx = appContext.reactContext
+          ?: throw CodedException("ENO_CONTEXT", "Android context unavailable", null)
+        var totalBytes = 0L
+        var completedCount = 0
+        val cursor: DownloadCursor =
+          DownloadUtil.getDownloadManager(ctx).downloadIndex.getDownloads()
+        cursor.use {
+          while (cursor.moveToNext()) {
+            val d = cursor.download
+            totalBytes += d.bytesDownloaded
+            if (d.state == Download.STATE_COMPLETED) completedCount++
+          }
+        }
+        promise.resolve(mapOf(
+          "usedBytes" to totalBytes.toDouble(),
+          "downloadCount" to completedCount,
+        ))
+      } catch (e: Throwable) {
+        promise.reject("ESTATS_FAILED", e.message ?: "Unknown error", e)
+      }
+    }
   }
 
-  private fun toMap(d: Download): Map<String, Any?> {
+  private fun toMap(ctx: android.content.Context, d: Download): Map<String, Any?> {
     val state = when (d.state) {
       Download.STATE_QUEUED -> "queued"
       Download.STATE_DOWNLOADING -> "downloading"
@@ -215,6 +248,12 @@ class IcareOfflineDrmModule : Module() {
       else -> "queued"
     }
     val pct = if (d.percentDownloaded.isNaN()) -1.0 else d.percentDownloaded.toDouble()
+
+    // Record completion timestamp the first time state transitions to completed.
+    if (d.state == Download.STATE_COMPLETED) {
+      DownloadMetadata.ensureCompletedAt(ctx, d.request.id)
+    }
+
     return mapOf(
       "id" to d.request.id,
       "state" to state,
@@ -222,6 +261,8 @@ class IcareOfflineDrmModule : Module() {
       "contentLength" to d.contentLength.toDouble(),
       "percentDownloaded" to pct,
       "failureReason" to d.failureReason.takeIf { d.state == Download.STATE_FAILED }?.toString(),
+      "title" to DownloadMetadata.getTitle(ctx, d.request.id),
+      "downloadedAt" to DownloadMetadata.getCompletedAt(ctx, d.request.id),
     )
   }
 }
