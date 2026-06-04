@@ -618,9 +618,12 @@ export default function ExploreScreen() {
    * call __icareFetchTokens with the chapterId.
    */
   const injectApiCredentials = useCallback((chapterId?: string) => {
-    if (!chapterId) return; // Nothing to do — key already embedded at boot
+    if (!chapterId) return;
+    const hasRef = webRef.current !== null;
+    console.log(`[explore] injectApiCredentials: chapterId=${chapterId} webRef.current=${hasRef ? 'SET' : 'NULL'}`);
     const script = `window.__icareFetchTokens(${JSON.stringify(chapterId)}); true;`;
     webRef.current?.injectJavaScript(script);
+    console.log(`[explore] injectJavaScript dispatched (webRef ${hasRef ? 'was set' : 'was NULL — script NOT sent'})`);
   }, []);
 
   /**
@@ -781,7 +784,7 @@ export default function ExploreScreen() {
    * The player calls waitForPlayerData() to receive the result.
    */
   const requestTokensFromWebView = useCallback((chapterId: string) => {
-    console.log(`[explore] Requesting fresh tokens from WebView for chapter ${chapterId}`);
+    console.log(`[explore] requestTokensFromWebView called for chapter ${chapterId}`);
     injectApiCredentials(chapterId);
   }, [injectApiCredentials]);
 
@@ -831,11 +834,12 @@ function _setTokenRequester(fn: ((chapterId: string) => void) | null): void {
  * currently mounted.
  */
 export function requestWebViewTokens(chapterId: string): boolean {
+  console.log(`[explore] requestWebViewTokens: _tokenRequester=${_tokenRequester !== null ? 'SET' : 'NULL'}`);
   if (_tokenRequester) {
     _tokenRequester(chapterId);
     return true;
   }
-  console.warn('[explore] requestWebViewTokens called but ExploreScreen is not mounted');
+  console.warn('[explore] requestWebViewTokens: ExploreScreen not mounted — returning false');
   return false;
 }
 

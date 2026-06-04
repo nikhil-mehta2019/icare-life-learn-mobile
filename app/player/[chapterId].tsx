@@ -472,6 +472,34 @@ export default function ChapterPlayerScreen() {
     return undefined;
   }, [mode, offline, tokens]);
 
+  // ── token resolver: use already-held tokens or request fresh ones ──
+  // Root cause of 20s timeout: when the player is a Stack screen on top of
+  // the (tabs) screen, Android suspends the WebView postMessage bridge for
+  // the backgrounded tab screen. injectJavaScript fires but CHAPTER_TOKENS
+  // never arrives back in onMessage. Always prefer the tokens already in
+  // component state (delivered synchronously at chapter-open time) before
+  // falling back to the WebView bridge.
+  const resolveTokens = useCallback(async (): Promise<MuxTokenResponse | null> => {
+    // Fast path: tokens are already in state from the chapter-open flow.
+    // This avoids the WebView bridge entirely — critical on Android where
+    // postMessage from a backgrounded Stack screen is unreliable.
+    if (tokens) {
+      console.log(`[player] resolveTokens: fast-path — using tokens already in state for ${chapterId}`);
+      return tokens;
+    }
+    console.log(`[player] resolveTokens: slow-path — requesting from WebView bridge for ${chapterId}`);
+    // Slow path: only reached if player was opened without prior token delivery
+    // (e.g. direct deep-link navigation).
+    const dispatched = requestWebViewTokens(chapterId!);
+    console.log(`[player] resolveTokens: requestWebViewTokens returned ${dispatched}`);
+    if (!dispatched) return null;
+    const handle = waitForPlayerData(chapterId!);
+    const result = await handle.promise;
+    console.log(`[player] resolveTokens: waitForPlayerData resolved ok=${result.ok}`);
+    if (!result.ok) throw new Error(result.error);
+    return result.data.tokens;
+  }, [tokens, chapterId]);
+
   // ── download handler ──
   const handleDownload = useCallback(async () => {
     if (!chapter || !chapterId) return;
@@ -496,21 +524,12 @@ export default function ChapterPlayerScreen() {
         // Storage check failed — proceed anyway, ExoPlayer will catch a full disk.
       }
 
-      const dispatched = requestWebViewTokens(chapterId);
-      if (!dispatched) {
+      const tk = await resolveTokens();
+      if (!tk) {
         Alert.alert('Download failed', 'Please return to the course page and try again.');
         return;
       }
 
-      const handle = waitForPlayerData(chapterId);
-      const result = await handle.promise;
-
-      if (!result.ok) {
-        Alert.alert('Download failed', result.error);
-        return;
-      }
-
-      const tk = result.data.tokens;
       await IcareOfflineDrm.startDownload({
         id: chapterId,
         manifestUrl: tk.secureStreamUrl,
@@ -523,7 +542,7 @@ export default function ChapterPlayerScreen() {
     } finally {
       setIsDownloadPending(false);
     }
-  }, [chapter, chapterId, isDownloadPending]);
+  }, [chapter, chapterId, isDownloadPending, resolveTokens]);
 
   // ── delete-download handler ──
   const handleDeleteDownload = useCallback(async () => {
@@ -574,19 +593,11 @@ export default function ChapterPlayerScreen() {
     if (!chapterId || isDownloadPending) return;
     setIsDownloadPending(true);
     try {
-      // Storage pre-check not needed for renewal — it's a license call, not a segment download.
-      const dispatched = requestWebViewTokens(chapterId);
-      if (!dispatched) {
+      const tk = await resolveTokens();
+      if (!tk) {
         Alert.alert('Renewal failed', 'Please return to the course page and try again.');
         return;
       }
-      const handle = waitForPlayerData(chapterId);
-      const result = await handle.promise;
-      if (!result.ok) {
-        Alert.alert('Renewal failed', result.error);
-        return;
-      }
-      const tk = result.data.tokens;
       await IcareOfflineDrm.renewOfflineLicense(chapterId, tk.drmLicenseUrl, tk.drmToken);
       // Force re-check so the UI reflects the renewed license.
       const updated = await IcareOfflineDrm.getDownload(chapterId);
@@ -597,7 +608,7 @@ export default function ChapterPlayerScreen() {
     } finally {
       setIsDownloadPending(false);
     }
-  }, [chapterId, isDownloadPending]);
+  }, [chapterId, isDownloadPending, resolveTokens]);
 
   // ── webview-fallback navigation ── (disabled: show download UI instead of going back)
   // Previously this navigated back immediately, but that meant Android users
