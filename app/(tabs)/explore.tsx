@@ -48,11 +48,12 @@
 
 import { useRouter, type Href } from 'expo-router';
 import { useCallback, useRef } from 'react';
-import { StyleSheet } from 'react-native';
+import { Alert, StyleSheet } from 'react-native';
 import { WebView, type WebViewMessageEvent } from 'react-native-webview';
 import type { ShouldStartLoadRequest } from 'react-native-webview/lib/WebViewTypes';
 import { deliverPlayerData, deliverPlayerError } from '../../api/playerCache';
 import { API_KEY, BASE_URL } from '../../api/base44Client';
+import IcareOfflineDrm from '../../modules/icare-offline-drm';
 
 const BASE44_URL = 'https://icare-life-learn.base44.app';
 
@@ -423,6 +424,123 @@ const INJECTED_JS = `
     }
   }
 
+  // ── Floating download button ──────────────────────────────────────────────
+  //
+  // Rendered as a native-feeling overlay inside the WebView so the user can
+  // download a chapter for offline viewing without the native player opening.
+  // Appears only when a chapter URL is active; hides when the user navigates away.
+
+  var _dlBtn = null;
+  var _dlChapterId = null;
+  var _dlInProgress = false;
+
+  function _showDownloadBtn(chapterId) {
+    if (_dlBtn) { _dlBtn.dataset.cid = chapterId; _dlChapterId = chapterId; return; }
+    var btn = document.createElement('button');
+    btn.id = '__icare_dl_btn';
+    btn.dataset.cid = chapterId;
+    btn.textContent = '⬇ Download';
+    btn.style.cssText = [
+      'position:fixed',
+      'bottom:72px',
+      'right:16px',
+      'z-index:2147483647',
+      'background:#1D3D47',
+      'color:#fff',
+      'border:none',
+      'border-radius:22px',
+      'padding:10px 18px',
+      'font-size:14px',
+      'font-weight:600',
+      'box-shadow:0 2px 8px rgba(0,0,0,0.35)',
+      'cursor:pointer',
+      'display:flex',
+      'align-items:center',
+      'gap:6px',
+      'font-family:system-ui,sans-serif',
+      'letter-spacing:0.2px',
+    ].join(';');
+    btn.addEventListener('click', function() {
+      if (_dlInProgress) return;
+      var cid = btn.dataset.cid;
+      if (!cid) return;
+      _dlInProgress = true;
+      btn.textContent = '⏳ Preparing…';
+      btn.style.opacity = '0.75';
+      _doDownloadFetch(cid, btn);
+    });
+    document.body.appendChild(btn);
+    _dlBtn = btn;
+    _dlChapterId = chapterId;
+  }
+
+  function _hideDownloadBtn() {
+    if (_dlBtn) { _dlBtn.remove(); _dlBtn = null; }
+    _dlChapterId = null;
+    _dlInProgress = false;
+  }
+
+  function _resetDownloadBtn() {
+    _dlInProgress = false;
+    if (_dlBtn) { _dlBtn.textContent = '⬇ Download'; _dlBtn.style.opacity = '1'; }
+  }
+
+  // Separate fetch path for download — posts DOWNLOAD_CHAPTER (not OPEN_CHAPTER).
+  function _doDownloadFetch(chapterId, btn) {
+    var key = _apiKey;
+    var api = _baseApi;
+    var hdrs = { 'Content-Type': 'application/json', 'api_key': key };
+
+    fetchJsonWithTimeout('Chapter fetch', api + '/entities/Chapter/' + chapterId,
+          { headers: hdrs, credentials: 'include' }, FETCH_TIMEOUT_MS)
+      .then(function(r) {
+        if (!r.ok) throw new Error('Chapter fetch failed (' + r.status + ')');
+        return r.json();
+      })
+      .then(function(chapter) {
+        var playbackId =
+          (chapter.muxDrmProtected && chapter.muxDrmPlaybackId)
+            ? chapter.muxDrmPlaybackId
+          : (chapter.muxSignedPlaybackRequired && chapter.muxSignedPlaybackId)
+            ? chapter.muxSignedPlaybackId
+          : (chapter.muxPlaybackId || null);
+        if (!playbackId) throw new Error('Chapter has no Mux playback ID');
+
+        var muxHdrs = Object.assign({}, hdrs);
+        if (_capturedAuthHeaders._ready) {
+          Object.keys(_capturedAuthHeaders).forEach(function(k) {
+            if (k !== '_ready') muxHdrs[k] = _capturedAuthHeaders[k];
+          });
+        } else {
+          var jwt = _getLocalStorageJwt();
+          if (jwt) { muxHdrs['Authorization'] = 'Bearer ' + jwt; }
+        }
+
+        return fetchJsonWithTimeout('getMuxToken', api + '/functions/getMuxToken', {
+          method: 'POST',
+          headers: muxHdrs,
+          credentials: 'include',
+          body: JSON.stringify({ playbackId: playbackId }),
+        }, FETCH_TIMEOUT_MS).then(function(r) {
+          if (!r.ok) return r.json().catch(function(){return{};}).then(function(eb){
+            throw new Error(eb.error || ('getMuxToken failed (' + r.status + ')'));
+          });
+          return r.json();
+        }).then(function(tokens) {
+          _postMessage({ type: 'DOWNLOAD_CHAPTER', chapterId: chapterId,
+                         chapter: chapter, tokens: tokens });
+          if (btn) { btn.textContent = '✓ Queued'; btn.style.background = '#2e7d32'; }
+          setTimeout(function() { _resetDownloadBtn(); }, 3000);
+        });
+      })
+      .catch(function(err) {
+        log('error', 'Download fetch failed: ' + String(err));
+        _postMessage({ type: 'DOWNLOAD_ERROR', chapterId: chapterId, error: String(err) });
+        if (btn) { btn.textContent = '✗ Failed'; btn.style.background = '#b71c1c'; }
+        setTimeout(function() { _resetDownloadBtn(); }, 3000);
+      });
+  }
+
   // ── SPA navigation monitor ────────────────────────────────────────────────
   //
   // De-duplication: _lastFiredId is cleared ONLY when the URL actually changes
@@ -440,8 +558,11 @@ const INJECTED_JS = `
         log('info', 'Left chapter URL — resetting dedup guard');
         _lastFiredId = null;
       }
+      _hideDownloadBtn();
       return;
     }
+
+    _showDownloadBtn(chapterId);
 
     if (chapterId === _lastFiredId) {
       // Same chapter URL — already handled this navigation.
@@ -595,6 +716,33 @@ export default function ExploreScreen() {
           }
           console.warn(`[explore] CHAPTER_ERROR for chapter ${chapterId}: ${msg.error}`);
           deliverPlayerError(chapterId, String(msg.error ?? 'Unknown error from WebView bridge'));
+          break;
+
+        case 'DOWNLOAD_CHAPTER': {
+          if (!chapterId) {
+            console.warn('[explore] DOWNLOAD_CHAPTER received without chapterId — ignored');
+            break;
+          }
+          const dlChapter = msg.chapter as any;
+          const dlTokens  = msg.tokens  as any;
+          console.log(`[explore] DOWNLOAD_CHAPTER — starting offline download for chapter ${chapterId}`);
+          IcareOfflineDrm.startDownload({
+            id:            chapterId,
+            manifestUrl:   dlTokens.secureStreamUrl,
+            drmLicenseUrl: dlTokens.drmLicenseUrl,
+            drmToken:      dlTokens.drmToken,
+            title:         dlChapter?.title ?? chapterId,
+          }).catch((err: any) => {
+            console.error(`[explore] Download failed for chapter ${chapterId}:`, err);
+            Alert.alert('Download failed', err?.message ?? String(err));
+          });
+          break;
+        }
+
+        case 'DOWNLOAD_ERROR':
+          if (!chapterId) break;
+          console.warn(`[explore] DOWNLOAD_ERROR for chapter ${chapterId}: ${msg.error}`);
+          Alert.alert('Download failed', String(msg.error ?? 'Could not fetch tokens for download'));
           break;
 
         default:
