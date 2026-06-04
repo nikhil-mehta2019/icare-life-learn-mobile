@@ -521,12 +521,9 @@ export default function ChapterPlayerScreen() {
     router.push('/(tabs)/downloads' as any);
   }, [router]);
 
-  // ── webview-fallback navigation ──
-  useEffect(() => {
-    if (mode !== 'webview-fallback') return;
-    const timer = setTimeout(() => router.back(), 100);
-    return () => clearTimeout(timer);
-  }, [mode, router]);
+  // ── webview-fallback navigation ── (disabled: show download UI instead of going back)
+  // Previously this navigated back immediately, but that meant Android users
+  // had no way to trigger a download. Now we stay on screen and show controls.
 
   // ── ALL HOOKS ABOVE ───────────────────────────────────────────────────────
 
@@ -541,9 +538,24 @@ export default function ChapterPlayerScreen() {
 
   if (mode === 'webview-fallback') {
     return (
-      <View style={styles.center}>
-        <ActivityIndicator size="large" />
-        <Text style={styles.muted}>Opening in browser…</Text>
+      <View style={[styles.center, { justifyContent: 'flex-start', paddingTop: 40, paddingHorizontal: 24 }]}>
+        <Text style={[styles.muted, { fontSize: 18, fontWeight: '700', color: '#fff', marginBottom: 8, textAlign: 'center' }]}>
+          {chapter?.title ?? 'Chapter'}
+        </Text>
+        <Text style={[styles.muted, { marginBottom: 32, textAlign: 'center' }]}>
+          Watch this chapter in the Learn tab. You can download it here for offline viewing.
+        </Text>
+        <DownloadControls
+          download={download}
+          offline={false}
+          offlineDownload={download}
+          onDownload={handleDownload}
+          onDelete={handleDeleteDownload}
+          onGoToDownloads={handleGoToDownloads}
+        />
+        <Pressable style={[styles.btn, styles.btnSecondary, { marginTop: 16 }]} onPress={() => router.back()}>
+          <Text style={[styles.btnText, { color: '#1D3D47' }]}>Go Back</Text>
+        </Pressable>
       </View>
     );
   }
@@ -580,12 +592,7 @@ export default function ChapterPlayerScreen() {
   }
 
   if (FORCE_ANDROID_WEBVIEW_PLAYER && mode === 'online') {
-    return (
-      <View style={styles.center}>
-        <ActivityIndicator size="large" />
-        <Text style={styles.muted}>Opening in browser…</Text>
-      </View>
-    );
+    return null;
   }
 
   return (
