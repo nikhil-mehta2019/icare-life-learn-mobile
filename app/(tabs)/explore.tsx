@@ -47,7 +47,7 @@
  */
 
 import { useRouter, type Href } from 'expo-router';
-import { useCallback, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { Alert, StyleSheet } from 'react-native';
 import { WebView, type WebViewMessageEvent } from 'react-native-webview';
 import type { ShouldStartLoadRequest } from 'react-native-webview/lib/WebViewTypes';
@@ -785,10 +785,14 @@ export default function ExploreScreen() {
     injectApiCredentials(chapterId);
   }, [injectApiCredentials]);
 
-  // Expose requestTokensFromWebView globally so the player screen can call it
-  // without prop-drilling through the navigation stack.
-  // This is stored in a module-level ref to avoid circular imports.
-  _setTokenRequester(requestTokensFromWebView);
+  // Register the token requester in an effect so it is set after mount and
+  // cleared on unmount. Calling _setTokenRequester in the render body was a
+  // React rules violation (side effect during render) and could leave a stale
+  // closure if the screen unmounts while the player is waiting for tokens.
+  useEffect(() => {
+    _setTokenRequester(requestTokensFromWebView);
+    return () => { _setTokenRequester(null); };
+  }, [requestTokensFromWebView]);
 
   return (
     <WebView
@@ -817,7 +821,7 @@ export default function ExploreScreen() {
 
 let _tokenRequester: ((chapterId: string) => void) | null = null;
 
-function _setTokenRequester(fn: (chapterId: string) => void): void {
+function _setTokenRequester(fn: ((chapterId: string) => void) | null): void {
   _tokenRequester = fn;
 }
 
