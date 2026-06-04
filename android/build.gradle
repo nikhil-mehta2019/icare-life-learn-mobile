@@ -18,6 +18,16 @@ allprojects {
     mavenCentral()
     maven { url 'https://www.jitpack.io' }
   }
+
+  configurations.all {
+    resolutionStrategy {
+      // react-native-video 5.x pulls in com.github.adityaxjha:Android-ScalableVideoView
+      // via JitPack, which declares a dependency on com.android.support:appcompat-v7:31.0.0.
+      // That version does not exist — the old support library stopped at 28.0.0.
+      // Pin it to the last published version so Gradle can resolve the dependency.
+      force 'com.android.support:appcompat-v7:28.0.0'
+    }
+  }
 }
 
 apply plugin: "expo-root-project"
