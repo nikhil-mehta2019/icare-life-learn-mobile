@@ -355,6 +355,7 @@ export default function ChapterPlayerScreen() {
     (async () => {
       try {
         if (!chapterId) throw new Error('Missing chapterId');
+        console.log(`[player] initialLoad START — chapterId=${chapterId} platform=${Platform.OS}`);
 
         // 1) Restore last-watched position
         const savedProg = await getProgress(chapterId);
@@ -363,15 +364,12 @@ export default function ChapterPlayerScreen() {
         }
 
         // 2) Check for offline copy — fully local, zero network calls.
-        //    getDownload() reads from ExoPlayer's SQLite DB (local).
-        //    getOfflineSource() reads DB + EncryptedSharedPrefs (local).
-        //    chapterFromDownload() synthesises a Chapter from stored title (local).
-        //    None of these touch the network, so airplane mode is supported.
         const [off, dlInfo] = await Promise.all([
           IcareOfflineDrm.getOfflineSource({ id: chapterId }),
           IcareOfflineDrm.getDownload(chapterId),
         ]);
         if (cancelled) return;
+        console.log(`[player] initialLoad: offlineSource=${off ? 'FOUND' : 'null'} dlInfo=${dlInfo ? dlInfo.state : 'null'}`);
 
         if (off) {
           // Build chapter entirely from local storage — no fetchChapter() call.
@@ -380,18 +378,19 @@ export default function ChapterPlayerScreen() {
           setOffline(off);
           setDownload(dlInfo);
           setMode('offline');
+          console.log(`[player] initialLoad: → mode=offline (tokens NOT set — offline path)`);
           return;
         }
 
-        // 3) No offline copy — check network before waiting for tokens
-        // isOnline can be null (not yet checked). Proceed optimistically.
-        // The token wait will handle the timeout case.
+        // 3) No offline copy — wait for tokens from WebView bridge.
+        console.log(`[player] initialLoad: no offline copy — waiting for playerCache delivery`);
         const handle = waitForPlayerData(chapterId);
         cancelWait = handle.cancel;
 
         const result: BridgeResult = await handle.promise;
         if (cancelled) return;
         cancelWait = null;
+        console.log(`[player] initialLoad: playerCache resolved ok=${result.ok}`);
 
         if (result.ok) {
           setChapter(result.data.chapter);
@@ -401,6 +400,7 @@ export default function ChapterPlayerScreen() {
           } else {
             setMode('online');
           }
+          console.log(`[player] initialLoad: → mode=${FORCE_ANDROID_WEBVIEW_PLAYER ? 'webview-fallback' : 'online'} tokens=SET`);
           return;
         }
 
@@ -480,23 +480,35 @@ export default function ChapterPlayerScreen() {
   // component state (delivered synchronously at chapter-open time) before
   // falling back to the WebView bridge.
   const resolveTokens = useCallback(async (): Promise<MuxTokenResponse | null> => {
+    console.log(`[player] resolveTokens ENTER — chapterId=${chapterId} tokens=${tokens ? 'SET' : 'NULL'}`);
+
     // Fast path: tokens are already in state from the chapter-open flow.
     // This avoids the WebView bridge entirely — critical on Android where
     // postMessage from a backgrounded Stack screen is unreliable.
     if (tokens) {
-      console.log(`[player] resolveTokens: fast-path — using tokens already in state for ${chapterId}`);
+      console.log(`[player] resolveTokens: FAST-PATH — returning tokens from state for ${chapterId}`);
       return tokens;
     }
-    console.log(`[player] resolveTokens: slow-path — requesting from WebView bridge for ${chapterId}`);
-    // Slow path: only reached if player was opened without prior token delivery
-    // (e.g. direct deep-link navigation).
+
+    // Slow path: only reached when player opened without prior token delivery
+    // (e.g. offline→delete→resume, or direct deep-link navigation).
+    console.log(`[player] resolveTokens: SLOW-PATH — requesting from WebView bridge for ${chapterId}`);
+    console.log(`[player] resolveTokens: calling requestWebViewTokens…`);
     const dispatched = requestWebViewTokens(chapterId!);
-    console.log(`[player] resolveTokens: requestWebViewTokens returned ${dispatched}`);
-    if (!dispatched) return null;
+    console.log(`[player] resolveTokens: requestWebViewTokens returned ${dispatched} (_tokenRequester ${dispatched ? 'SET' : 'NULL'})`);
+
+    if (!dispatched) {
+      console.warn(`[player] resolveTokens: ExploreScreen not mounted — cannot request tokens`);
+      return null;
+    }
+
+    console.log(`[player] resolveTokens: waiting for playerCache delivery (${20}s timeout)…`);
     const handle = waitForPlayerData(chapterId!);
     const result = await handle.promise;
-    console.log(`[player] resolveTokens: waitForPlayerData resolved ok=${result.ok}`);
+    console.log(`[player] resolveTokens: playerCache resolved ok=${result.ok}${result.ok ? '' : ` error=${(result as any).error}`}`);
+
     if (!result.ok) throw new Error(result.error);
+    console.log(`[player] resolveTokens: SLOW-PATH success — tokens delivered`);
     return result.data.tokens;
   }, [tokens, chapterId]);
 
@@ -506,6 +518,7 @@ export default function ChapterPlayerScreen() {
     // Guard: prevent concurrent executions from double-tap.
     if (isDownloadPending) return;
 
+    console.log(`[player] handleDownload: START — chapterId=${chapterId} tokens=${tokens ? 'SET' : 'NULL'} mode=${mode}`);
     setIsDownloadPending(true);
     try {
       // Storage pre-check: require at least 500 MB free before starting.
@@ -524,12 +537,16 @@ export default function ChapterPlayerScreen() {
         // Storage check failed — proceed anyway, ExoPlayer will catch a full disk.
       }
 
+      console.log(`[player] handleDownload: calling resolveTokens…`);
       const tk = await resolveTokens();
+      console.log(`[player] handleDownload: resolveTokens returned ${tk ? 'tokens' : 'null'}`);
+
       if (!tk) {
         Alert.alert('Download failed', 'Please return to the course page and try again.');
         return;
       }
 
+      console.log(`[player] handleDownload: calling IcareOfflineDrm.startDownload for ${chapterId}`);
       await IcareOfflineDrm.startDownload({
         id: chapterId,
         manifestUrl: tk.secureStreamUrl,
@@ -537,16 +554,21 @@ export default function ChapterPlayerScreen() {
         drmToken: tk.drmToken,
         title: chapter.title,
       });
+      console.log(`[player] handleDownload: startDownload call returned (download queued)`);
     } catch (err: any) {
+      console.error(`[player] handleDownload: FAILED — ${err?.message}`);
       Alert.alert('Download failed', err?.message ?? String(err));
     } finally {
       setIsDownloadPending(false);
     }
-  }, [chapter, chapterId, isDownloadPending, resolveTokens]);
+  }, [chapter, chapterId, isDownloadPending, resolveTokens, tokens, mode]);
 
   // ── delete-download handler ──
+  // Uses resolveTokens() so the fast-path (tokens already in state) is taken
+  // on Android, where the backgrounded WebView postMessage bridge is unreliable.
   const handleDeleteDownload = useCallback(async () => {
     if (!chapterId) return;
+    console.log(`[player] handleDeleteDownload: removing download for ${chapterId}`);
     await IcareOfflineDrm.removeDownload(chapterId);
     await clearProgress(chapterId);
     setDownload(null);
@@ -559,29 +581,33 @@ export default function ChapterPlayerScreen() {
     }
 
     setMode('loading');
-    const dispatched = requestWebViewTokens(chapterId);
-    if (!dispatched) {
+    console.log(`[player] handleDeleteDownload: resolving tokens for ${chapterId}`);
+
+    let tk: MuxTokenResponse | null = null;
+    try {
+      tk = await resolveTokens();
+    } catch (err: any) {
+      console.error(`[player] handleDeleteDownload: resolveTokens threw: ${err?.message}`);
+      setErrorMsg(err?.message ?? 'Could not resume streaming');
+      setMode('error');
+      return;
+    }
+
+    if (!tk) {
+      console.warn(`[player] handleDeleteDownload: resolveTokens returned null`);
       setErrorMsg('Please return to the course page and tap the chapter again.');
       setMode('error');
       return;
     }
 
-    const handle = waitForPlayerData(chapterId);
-    const result = await handle.promise;
-
-    if (!result.ok) {
-      setErrorMsg(`Could not resume streaming: ${result.error}`);
-      setMode('error');
-      return;
-    }
-
-    setTokens(result.data.tokens);
+    console.log(`[player] handleDeleteDownload: tokens resolved — resuming streaming`);
+    setTokens(tk);
     if (FORCE_ANDROID_WEBVIEW_PLAYER) {
       setMode('webview-fallback');
     } else {
       setMode('online');
     }
-  }, [chapter, chapterId]);
+  }, [chapter, chapterId, resolveTokens]);
 
   // ── Go to downloads ──
   const handleGoToDownloads = useCallback(() => {

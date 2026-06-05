@@ -620,10 +620,28 @@ export default function ExploreScreen() {
   const injectApiCredentials = useCallback((chapterId?: string) => {
     if (!chapterId) return;
     const hasRef = webRef.current !== null;
-    console.log(`[explore] injectApiCredentials: chapterId=${chapterId} webRef.current=${hasRef ? 'SET' : 'NULL'}`);
-    const script = `window.__icareFetchTokens(${JSON.stringify(chapterId)}); true;`;
-    webRef.current?.injectJavaScript(script);
-    console.log(`[explore] injectJavaScript dispatched (webRef ${hasRef ? 'was set' : 'was NULL — script NOT sent'})`);
+    console.log(`[explore] injectApiCredentials ENTER — chapterId=${chapterId} webRef=${hasRef ? 'SET' : 'NULL'}`);
+    if (!hasRef) {
+      console.warn(`[explore] injectApiCredentials: webRef is NULL — WebView not mounted or not yet loaded. Script will NOT be injected.`);
+      return;
+    }
+    const script = `
+      console.log('[icare-bridge] __icareFetchTokens called from native for ${chapterId}');
+      if (typeof window.__icareFetchTokens === 'function') {
+        window.__icareFetchTokens(${JSON.stringify(chapterId)});
+        true;
+      } else {
+        console.error('[icare-bridge] __icareFetchTokens NOT DEFINED — bridge not installed');
+        window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'CHAPTER_ERROR',
+          chapterId: ${JSON.stringify(chapterId)},
+          error: '__icareFetchTokens not defined — bridge may not have loaded yet'
+        }));
+        true;
+      }
+    `;
+    webRef.current!.injectJavaScript(script);
+    console.log(`[explore] injectJavaScript dispatched for chapterId=${chapterId}`);
   }, []);
 
   /**
@@ -817,6 +835,12 @@ export default function ExploreScreen() {
   );
 }
 
+// ─── Styles ──────────────────────────────────────────────────────────────────
+
+const styles = StyleSheet.create({
+  webview: { flex: 1 },
+});
+
 // ─── Token requester registry ─────────────────────────────────────────────────
 //
 // Allows the player screen to trigger a WebView token fetch without a shared
@@ -842,7 +866,3 @@ export function requestWebViewTokens(chapterId: string): boolean {
   console.warn('[explore] requestWebViewTokens: ExploreScreen not mounted — returning false');
   return false;
 }
-
-const styles = StyleSheet.create({
-  webview: { flex: 1 },
-});
