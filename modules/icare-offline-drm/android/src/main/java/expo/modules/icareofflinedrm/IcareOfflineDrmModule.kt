@@ -60,27 +60,46 @@ class IcareOfflineDrmModule : Module() {
         }
 
         // 2) Acquire the offline Widevine license + persist its keySetId.
-        OfflineLicenseManager.acquireAndStore(
-          ctx,
-          downloadId = params.id,
-          manifestUrl = params.manifestUrl,
-          licenseUrl = params.drmLicenseUrl,
-          licenseToken = params.drmToken,
-        )
+        //    ONLY for DRM-protected content (drmLicenseUrl is non-empty).
+        //    Signed-only (non-DRM) chapters have an empty drmLicenseUrl and
+        //    no PSSH in the manifest. Calling acquireAndStore() for those
+        //    triggers ExoPlayer's DRM init path, which hangs for 30 s and
+        //    throws "DownloadHelper prep timed out".
+        val isDrmProtected = !params.drmLicenseUrl.isNullOrEmpty()
+        if (isDrmProtected) {
+          OfflineLicenseManager.acquireAndStore(
+            ctx,
+            downloadId = params.id,
+            manifestUrl = params.manifestUrl,
+            licenseUrl = params.drmLicenseUrl,
+            licenseToken = params.drmToken,
+          )
+        }
 
         // 3) Build the download request (HLS — Mux returns m3u8).
-        //    Pass DRM config so ExoPlayer's DownloadHelper can initialise the
-        //    Widevine DRM session during prepare() without timing out.
-        val drmCfg3Builder = MediaItem.DrmConfiguration.Builder(C.WIDEVINE_UUID)
-          .setLicenseUri(params.drmLicenseUrl)
-        if (params.drmToken.isNotEmpty()) {
-          drmCfg3Builder.setLicenseRequestHeaders(mapOf("x-mux-license-token" to params.drmToken))
+        //    Only attach DRM config when the content is actually DRM-protected;
+        //    attaching DRM config for non-DRM content triggers Widevine HAL init
+        //    which hangs ("No supported hal instance found") and times out.
+        val mediaItemForHelper = if (isDrmProtected) {
+          val drmCfg = MediaItem.DrmConfiguration.Builder(C.WIDEVINE_UUID)
+            .setLicenseUri(params.drmLicenseUrl)
+            .apply {
+              if (!params.drmToken.isNullOrEmpty()) {
+                setLicenseRequestHeaders(mapOf("x-mux-license-token" to params.drmToken))
+              }
+            }
+            .build()
+          MediaItem.Builder()
+            .setMediaId(params.id)
+            .setUri(Uri.parse(params.manifestUrl))
+            .setDrmConfiguration(drmCfg)
+            .build()
+        } else {
+          MediaItem.Builder()
+            .setMediaId(params.id)
+            .setUri(Uri.parse(params.manifestUrl))
+            .build()
         }
-        val mediaItemForHelper = MediaItem.Builder()
-          .setMediaId(params.id)
-          .setUri(Uri.parse(params.manifestUrl))
-          .setDrmConfiguration(drmCfg3Builder.build())
-          .build()
         val helper = DownloadUtil.getDownloadHelperForMediaItem(ctx, mediaItemForHelper)
         val latch = java.util.concurrent.CountDownLatch(1)
         val prepErr = java.util.concurrent.atomic.AtomicReference<Throwable?>()
