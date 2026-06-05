@@ -1,6 +1,7 @@
 package expo.modules.icareofflinedrm
 
 import android.content.Context
+import android.media.MediaDrm
 import android.util.Base64
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -15,11 +16,23 @@ import androidx.media3.exoplayer.drm.OfflineLicenseHelper
 import androidx.media3.exoplayer.offline.DownloadHelper
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import java.util.UUID
 
 @UnstableApi
 object OfflineLicenseManager {
   private const val PREFS_NAME = "icare_offline_drm"
   private const val KEY_PREFIX = "ksid_"
+
+  // Widevine DRM UUID (EDEF8BA9-79D6-4ACE-A3C8-27DCD51D21ED).
+  // Using longs to avoid UUID.fromString() on older API levels.
+  private val WIDEVINE_UUID = UUID(-0x121074a6L, -0x5c37d8dbL)
+
+  /**
+   * Returns true if the device's Widevine DRM HAL is available and functional.
+   * Fails fast — no network calls, no 30 s hangs.
+   */
+  fun isWidevineAvailable(): Boolean =
+    try { MediaDrm.isCryptoSchemeSupported(WIDEVINE_UUID) } catch (_: Throwable) { false }
 
   private fun prefs(ctx: Context) =
     EncryptedSharedPreferences.create(
@@ -51,6 +64,15 @@ object OfflineLicenseManager {
     licenseUrl: String,
     licenseToken: String,
   ) {
+    // Fast-fail: if Widevine DRM is unavailable on this device (not provisioned,
+    // HAL missing, or security-level check failing) throw immediately instead of
+    // waiting 30 s for DownloadHelper.prepare() to time out.
+    if (!isWidevineAvailable()) {
+      throw IllegalStateException(
+        "Widevine DRM is not available on this device — offline download of DRM-protected content is not supported"
+      )
+    }
+
     val httpFactory = DefaultHttpDataSource.Factory().setUserAgent("IcareLifeLearn/1.0")
 
     // Attach Widevine DRM configuration to the MediaItem so ExoPlayer's
