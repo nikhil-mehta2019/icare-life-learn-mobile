@@ -83,6 +83,21 @@ object DownloadUtil {
     )
   }
 
+  /**
+   * Overload that accepts a pre-configured MediaItem (e.g. with DRM configuration).
+   * Use this when the media is DRM-protected so ExoPlayer can initialise the
+   * Widevine session during DownloadHelper.prepare() without timing out.
+   */
+  fun getDownloadHelperForMediaItem(ctx: Context, mediaItem: MediaItem): DownloadHelper {
+    val httpFactory = DefaultHttpDataSource.Factory().setUserAgent(USER_AGENT)
+    return DownloadHelper.forMediaItem(
+      ctx,
+      mediaItem,
+      DefaultRenderersFactory(ctx),
+      httpFactory,
+    )
+  }
+
   /** Convenience: synchronous prepare for short manifests. */
   fun DownloadHelper.prepareAsBlocking(): DownloadHelper {
     val latch = java.util.concurrent.CountDownLatch(1)

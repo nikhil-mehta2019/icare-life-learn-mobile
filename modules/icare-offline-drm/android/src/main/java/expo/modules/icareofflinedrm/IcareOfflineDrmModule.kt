@@ -1,6 +1,8 @@
 package expo.modules.icareofflinedrm
 
 import android.net.Uri
+import androidx.media3.common.C
+import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.offline.Download
 import androidx.media3.exoplayer.offline.DownloadCursor
@@ -67,11 +69,19 @@ class IcareOfflineDrmModule : Module() {
         )
 
         // 3) Build the download request (HLS — Mux returns m3u8).
-        val helper = DownloadUtil.getDownloadHelper(
-          ctx,
-          mediaItemId = params.id,
-          uri = Uri.parse(params.manifestUrl),
-        )
+        //    Pass DRM config so ExoPlayer's DownloadHelper can initialise the
+        //    Widevine DRM session during prepare() without timing out.
+        val drmCfg3Builder = MediaItem.DrmConfiguration.Builder(C.WIDEVINE_UUID)
+          .setLicenseUri(params.drmLicenseUrl)
+        if (params.drmToken.isNotEmpty()) {
+          drmCfg3Builder.setLicenseRequestHeaders(mapOf("x-mux-license-token" to params.drmToken))
+        }
+        val mediaItemForHelper = MediaItem.Builder()
+          .setMediaId(params.id)
+          .setUri(Uri.parse(params.manifestUrl))
+          .setDrmConfiguration(drmCfg3Builder.build())
+          .build()
+        val helper = DownloadUtil.getDownloadHelperForMediaItem(ctx, mediaItemForHelper)
         val latch = java.util.concurrent.CountDownLatch(1)
         val prepErr = java.util.concurrent.atomic.AtomicReference<Throwable?>()
         helper.prepare(object : androidx.media3.exoplayer.offline.DownloadHelper.Callback {

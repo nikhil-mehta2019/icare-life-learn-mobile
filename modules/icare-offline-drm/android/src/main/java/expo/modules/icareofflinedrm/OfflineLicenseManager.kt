@@ -2,11 +2,14 @@ package expo.modules.icareofflinedrm
 
 import android.content.Context
 import android.util.Base64
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.drm.DefaultDrmSessionManager
 import androidx.media3.exoplayer.drm.DrmSessionEventListener
+import androidx.media3.exoplayer.drm.FrameworkMediaDrm
 import androidx.media3.exoplayer.drm.HttpMediaDrmCallback
 import androidx.media3.exoplayer.drm.OfflineLicenseHelper
 import androidx.media3.exoplayer.offline.DownloadHelper
@@ -48,12 +51,24 @@ object OfflineLicenseManager {
     licenseUrl: String,
     licenseToken: String,
   ) {
+    val httpFactory = DefaultHttpDataSource.Factory().setUserAgent("IcareLifeLearn/1.0")
+
+    // Attach Widevine DRM configuration to the MediaItem so ExoPlayer's
+    // DownloadHelper can properly initialise the DRM session during prepare().
+    // Without this, ExoPlayer encounters the PSSH/DRM init data in the Mux HLS
+    // manifest and hangs waiting for a license server that was never configured,
+    // causing the 30 s "DownloadHelper prep timed out" error.
+    val drmConfigBuilder = MediaItem.DrmConfiguration.Builder(C.WIDEVINE_UUID)
+      .setLicenseUri(licenseUrl)
+    if (licenseToken.isNotEmpty()) {
+      drmConfigBuilder.setLicenseRequestHeaders(mapOf("x-mux-license-token" to licenseToken))
+    }
     val mediaItem = MediaItem.Builder()
       .setMediaId(downloadId)
       .setUri(manifestUrl)
+      .setDrmConfiguration(drmConfigBuilder.build())
       .build()
 
-    val httpFactory = DefaultHttpDataSource.Factory().setUserAgent("IcareLifeLearn/1.0")
     val helper = DownloadHelper.forMediaItem(
       ctx, mediaItem, DefaultRenderersFactory(ctx), httpFactory,
     )
