@@ -48,7 +48,7 @@
 
 import { useRouter, type Href } from 'expo-router';
 import { useCallback, useEffect, useRef } from 'react';
-import { Alert, StyleSheet } from 'react-native';
+import { Alert, Platform, StyleSheet } from 'react-native';
 import { WebView, type WebViewMessageEvent } from 'react-native-webview';
 import type { ShouldStartLoadRequest } from 'react-native-webview/lib/WebViewTypes';
 import { deliverPlayerData, deliverPlayerError } from '../../api/playerCache';
@@ -679,11 +679,21 @@ export default function ExploreScreen() {
             console.warn('[explore] OPEN_CHAPTER_WITH_TOKENS received without chapterId — ignored');
             break;
           }
-          console.log(`[explore] OPEN_CHAPTER_WITH_TOKENS → caching then navigating for chapter ${chapterId}`);
+          // Always cache tokens so offline-download flows can reuse them.
           deliverPlayerData(chapterId, {
             chapter: msg.chapter as any,
             tokens: msg.tokens as any,
           });
+          if (Platform.OS === 'android') {
+            // On Android, react-native-video is disabled for online playback.
+            // Base44 WebView handles streaming natively — do NOT navigate to
+            // the native player screen, which would interrupt playback by
+            // showing the webview-fallback download drawer instead of the video.
+            // Downloads remain available via the floating ⬇ button in the WebView.
+            console.log(`[explore] OPEN_CHAPTER_WITH_TOKENS on Android — tokens cached, staying in WebView for chapter ${chapterId}`);
+            break;
+          }
+          console.log(`[explore] OPEN_CHAPTER_WITH_TOKENS → caching then navigating for chapter ${chapterId}`);
           router.push({
             pathname: '/player/[chapterId]',
             params: { chapterId },
