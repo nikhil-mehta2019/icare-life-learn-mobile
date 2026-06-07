@@ -25,26 +25,44 @@ object OfflineLicenseManager {
   /**
    * Returns true if the device's Widevine DRM HAL is available and functional.
    *
-   * MediaDrm.isCryptoSchemeSupported() only checks framework UUID registration — it returns
-   * true even when the underlying HAL binary is missing or broken ("No supported hal instance
-   * found"). When ExoPlayer then tries to use the broken HAL, DownloadHelper.prepare() silently
-   * hangs for 30 s before timing out.
+   * Three-level probe — each level catches a different failure mode seen on MIUI/Xiaomi:
    *
-   * Instantiating MediaDrm directly probes the real HAL. If the HAL is broken it throws
-   * immediately (< 25 ms) so we can surface a clear error to the user instead of hanging.
+   * Level 1 — MediaDrm constructor:
+   *   Catches cases where the Widevine UUID is entirely absent from the framework.
+   *
+   * Level 2 — openSession():
+   *   The constructor can succeed even when the HIDL Widevine factory reports
+   *   "No supported hal instance found" (Android catches the HIDL/AIDL errors internally
+   *   and returns a stub object). openSession() forces the HAL to create a real DRM context
+   *   and throws NotProvisionedException / ResourceBusyException / MediaDrmException if the
+   *   session can't actually be established.
+   *
+   * Level 3 — getPropertyString("securityLevel"):
+   *   Reads a HAL property over the established session. Exercises the DRM ↔ HAL IPC path
+   *   one more time; a broken HAL may throw here even if openSession() passes.
+   *
+   * All three must succeed for the device to be considered Widevine-capable.
+   * If any level throws, we return false and the download is immediately rejected with a
+   * clear error instead of hanging for 30 s inside DownloadHelper.prepare().
    */
   fun isWidevineAvailable(): Boolean {
     var drm: MediaDrm? = null
+    var sessionId: ByteArray? = null
     return try {
+      // Level 1: constructor
       drm = MediaDrm(C.WIDEVINE_UUID)
+      // Level 2: openSession — forces real HAL session creation
+      sessionId = drm.openSession()
+      // Level 3: HAL property IPC
+      drm.getPropertyString("securityLevel")
+      android.util.Log.d("IcareOfflineDrm", "isWidevineAvailable: all checks passed")
       true
-    } catch (_: Throwable) {
+    } catch (e: Throwable) {
+      android.util.Log.d("IcareOfflineDrm", "isWidevineAvailable: FAILED — ${e::class.simpleName}: ${e.message}")
       false
     } finally {
-      try {
-        @Suppress("DEPRECATION")
-        drm?.release()
-      } catch (_: Throwable) { /* best-effort cleanup */ }
+      try { sessionId?.let { drm?.closeSession(it) } } catch (_: Throwable) {}
+      try { @Suppress("DEPRECATION") drm?.release() } catch (_: Throwable) {}
     }
   }
 
@@ -117,8 +135,8 @@ object OfflineLicenseManager {
         errRef.set(e); latch.countDown()
       }
     })
-    if (!latch.await(30, java.util.concurrent.TimeUnit.SECONDS))
-      throw java.io.IOException("DownloadHelper prep timed out")
+    if (!latch.await(8, java.util.concurrent.TimeUnit.SECONDS))
+      throw java.io.IOException("DownloadHelper prep timed out (8 s) — DRM or network unavailable")
     errRef.get()?.let { throw it }
 
     val format = findDrmFormat(helper) ?: run {

@@ -121,8 +121,8 @@ class IcareOfflineDrmModule : Module() {
             prepErr.set(e); latch.countDown()
           }
         })
-        if (!latch.await(30, java.util.concurrent.TimeUnit.SECONDS))
-          throw java.io.IOException("DownloadHelper timed out")
+        if (!latch.await(8, java.util.concurrent.TimeUnit.SECONDS))
+          throw java.io.IOException("DownloadHelper prep timed out (8 s) — DRM or network unavailable")
         prepErr.get()?.let { throw it }
         val downloadRequest: DownloadRequest = helper.getDownloadRequest(params.id, null)
         helper.release()

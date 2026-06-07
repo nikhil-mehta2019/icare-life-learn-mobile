@@ -108,8 +108,8 @@ object DownloadUtil {
         errorRef.set(e); latch.countDown()
       }
     })
-    if (!latch.await(30, java.util.concurrent.TimeUnit.SECONDS)) {
-      throw java.io.IOException("DownloadHelper.prepare timed out")
+    if (!latch.await(8, java.util.concurrent.TimeUnit.SECONDS)) {
+      throw java.io.IOException("DownloadHelper.prepare timed out (8 s) — DRM or network unavailable")
     }
     errorRef.get()?.let { throw it }
     return this
