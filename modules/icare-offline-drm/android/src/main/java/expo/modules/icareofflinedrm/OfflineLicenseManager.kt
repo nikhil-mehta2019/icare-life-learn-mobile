@@ -66,6 +66,64 @@ object OfflineLicenseManager {
     }
   }
 
+  /**
+   * Attempts to provision this device's Widevine DRM certificate by sending a
+   * provisioning request to Google's certificate server.
+   *
+   * Background: [isWidevineAvailable] can fail with ERROR_DRM_NOT_PROVISIONED on
+   * devices (commonly MIUI/Xiaomi) whose Widevine HAL is present but whose keybox
+   * certificate was never installed. The Android MediaDrm API provides a standard
+   * provisioning mechanism — the same one Google Play Services uses at first boot —
+   * that we can invoke on demand from within the app.
+   *
+   * Flow:
+   *  1. Create MediaDrm and call [MediaDrm.getProvisionRequest] to obtain a signed
+   *     certificate request.
+   *  2. POST the signed request to Google's provisioning server (defaultUrl).
+   *  3. Feed the server's response back via [MediaDrm.provideProvisionResponse],
+   *     which installs the keybox onto the device.
+   *  4. Return true if all steps succeed; false otherwise.
+   *
+   * After a successful call, [isWidevineAvailable] should return true.
+   */
+  fun provisionDevice(): Boolean {
+    var drm: MediaDrm? = null
+    return try {
+      drm = MediaDrm(C.WIDEVINE_UUID)
+      val provRequest = drm.getProvisionRequest()
+      // Google's provisioning server expects the signed request appended to the URL.
+      // provRequest.data is already Base64URL-encoded; converting to UTF-8 is correct.
+      val provUrl = "${provRequest.defaultUrl}&signedRequest=${String(provRequest.data, Charsets.UTF_8)}"
+      android.util.Log.d("IcareOfflineDrm", "provisionDevice: contacting ${provRequest.defaultUrl}")
+
+      val conn = java.net.URL(provUrl).openConnection() as java.net.HttpURLConnection
+      conn.apply {
+        requestMethod = "POST"
+        doOutput = false
+        connectTimeout = 15_000
+        readTimeout = 15_000
+      }
+      conn.connect()
+
+      val responseCode = conn.responseCode
+      if (responseCode !in 200..299) {
+        android.util.Log.e("IcareOfflineDrm", "provisionDevice: server returned HTTP $responseCode")
+        return false
+      }
+      val responseBytes = conn.inputStream.use { it.readBytes() }
+      conn.disconnect()
+
+      drm.provideProvisionResponse(responseBytes)
+      android.util.Log.d("IcareOfflineDrm", "provisionDevice: SUCCESS — device is now provisioned")
+      true
+    } catch (e: Throwable) {
+      android.util.Log.e("IcareOfflineDrm", "provisionDevice: FAILED — ${e::class.simpleName}: ${e.message}")
+      false
+    } finally {
+      try { @Suppress("DEPRECATION") drm?.release() } catch (_: Throwable) {}
+    }
+  }
+
   private fun prefs(ctx: Context) =
     EncryptedSharedPreferences.create(
       ctx,

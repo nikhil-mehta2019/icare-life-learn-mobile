@@ -66,14 +66,24 @@ class IcareOfflineDrmModule : Module() {
         //    triggers ExoPlayer's DRM init path, which hangs for 30 s and
         //    throws "DownloadHelper prep timed out".
         val isDrmProtected = !params.drmLicenseUrl.isNullOrEmpty()
-        val widevineOk = OfflineLicenseManager.isWidevineAvailable()
+        var widevineOk = OfflineLicenseManager.isWidevineAvailable()
         android.util.Log.d("IcareOfflineDrm",
           "startDownload: id=${params.id} isDrmProtected=$isDrmProtected " +
-          "licenseUrl='${params.drmLicenseUrl}' widevineAvailable=$widevineOk " +
-          "widevineUUID=${androidx.media3.common.C.WIDEVINE_UUID}")
+          "licenseUrl='${params.drmLicenseUrl}' widevineAvailable=$widevineOk")
 
         if (isDrmProtected) {
-          // Fast-fail if Widevine is unavailable rather than waiting 30 s.
+          // If Widevine check failed (commonly ERROR_DRM_NOT_PROVISIONED on MIUI devices),
+          // attempt automatic provisioning before giving up. The device's Widevine HAL may
+          // be present but simply missing its certificate — provisionDevice() fetches and
+          // installs it from Google's server, the same way Play Services does at first boot.
+          if (!widevineOk) {
+            android.util.Log.d("IcareOfflineDrm", "startDownload: Widevine not ready — attempting auto-provisioning")
+            val provisioned = OfflineLicenseManager.provisionDevice()
+            if (provisioned) {
+              widevineOk = OfflineLicenseManager.isWidevineAvailable()
+              android.util.Log.d("IcareOfflineDrm", "startDownload: post-provision widevineAvailable=$widevineOk")
+            }
+          }
           if (!widevineOk) {
             throw IllegalStateException(
               "Widevine DRM is not available on this device — cannot download DRM-protected content offline"
