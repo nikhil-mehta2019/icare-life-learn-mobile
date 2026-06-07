@@ -24,11 +24,29 @@ object OfflineLicenseManager {
 
   /**
    * Returns true if the device's Widevine DRM HAL is available and functional.
-   * Uses C.WIDEVINE_UUID from Media3 (the correct EDEF8BA9-79D6-4ACE-A3C8-27DCD51D21ED UUID).
-   * Fails fast — no network calls, no 30 s hangs.
+   *
+   * MediaDrm.isCryptoSchemeSupported() only checks framework UUID registration — it returns
+   * true even when the underlying HAL binary is missing or broken ("No supported hal instance
+   * found"). When ExoPlayer then tries to use the broken HAL, DownloadHelper.prepare() silently
+   * hangs for 30 s before timing out.
+   *
+   * Instantiating MediaDrm directly probes the real HAL. If the HAL is broken it throws
+   * immediately (< 25 ms) so we can surface a clear error to the user instead of hanging.
    */
-  fun isWidevineAvailable(): Boolean =
-    try { MediaDrm.isCryptoSchemeSupported(C.WIDEVINE_UUID) } catch (_: Throwable) { false }
+  fun isWidevineAvailable(): Boolean {
+    var drm: MediaDrm? = null
+    return try {
+      drm = MediaDrm(C.WIDEVINE_UUID)
+      true
+    } catch (_: Throwable) {
+      false
+    } finally {
+      try {
+        @Suppress("DEPRECATION")
+        drm?.release()
+      } catch (_: Throwable) { /* best-effort cleanup */ }
+    }
+  }
 
   private fun prefs(ctx: Context) =
     EncryptedSharedPreferences.create(
