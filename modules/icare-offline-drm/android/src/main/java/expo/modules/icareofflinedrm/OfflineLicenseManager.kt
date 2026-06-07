@@ -16,23 +16,19 @@ import androidx.media3.exoplayer.drm.OfflineLicenseHelper
 import androidx.media3.exoplayer.offline.DownloadHelper
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
-import java.util.UUID
 
 @UnstableApi
 object OfflineLicenseManager {
   private const val PREFS_NAME = "icare_offline_drm"
   private const val KEY_PREFIX = "ksid_"
 
-  // Widevine DRM UUID (EDEF8BA9-79D6-4ACE-A3C8-27DCD51D21ED).
-  // Using longs to avoid UUID.fromString() on older API levels.
-  private val WIDEVINE_UUID = UUID(-0x121074a6L, -0x5c37d8dbL)
-
   /**
    * Returns true if the device's Widevine DRM HAL is available and functional.
+   * Uses C.WIDEVINE_UUID from Media3 (the correct EDEF8BA9-79D6-4ACE-A3C8-27DCD51D21ED UUID).
    * Fails fast — no network calls, no 30 s hangs.
    */
   fun isWidevineAvailable(): Boolean =
-    try { MediaDrm.isCryptoSchemeSupported(WIDEVINE_UUID) } catch (_: Throwable) { false }
+    try { MediaDrm.isCryptoSchemeSupported(C.WIDEVINE_UUID) } catch (_: Throwable) { false }
 
   private fun prefs(ctx: Context) =
     EncryptedSharedPreferences.create(

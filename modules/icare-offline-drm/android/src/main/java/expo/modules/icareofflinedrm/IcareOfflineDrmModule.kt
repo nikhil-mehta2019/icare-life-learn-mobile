@@ -66,13 +66,15 @@ class IcareOfflineDrmModule : Module() {
         //    triggers ExoPlayer's DRM init path, which hangs for 30 s and
         //    throws "DownloadHelper prep timed out".
         val isDrmProtected = !params.drmLicenseUrl.isNullOrEmpty()
+        val widevineOk = OfflineLicenseManager.isWidevineAvailable()
         android.util.Log.d("IcareOfflineDrm",
           "startDownload: id=${params.id} isDrmProtected=$isDrmProtected " +
-          "licenseUrl='${params.drmLicenseUrl}' widevineAvailable=${OfflineLicenseManager.isWidevineAvailable()}")
+          "licenseUrl='${params.drmLicenseUrl}' widevineAvailable=$widevineOk " +
+          "widevineUUID=${androidx.media3.common.C.WIDEVINE_UUID}")
 
         if (isDrmProtected) {
           // Fast-fail if Widevine is unavailable rather than waiting 30 s.
-          if (!OfflineLicenseManager.isWidevineAvailable()) {
+          if (!widevineOk) {
             throw IllegalStateException(
               "Widevine DRM is not available on this device — cannot download DRM-protected content offline"
             )
