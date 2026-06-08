@@ -284,6 +284,9 @@ const INJECTED_JS = `
             });
             _capturedAuthHeaders._ready = true;
             log('info', 'Captured auth headers from fetch getMuxToken');
+            // Re-send JWT now that we have confirmed auth headers.
+            var freshJwt = _getLocalStorageJwt();
+            if (freshJwt) _postMessage({ type: 'AUTH_JWT', jwt: freshJwt });
           } catch (e) {}
         }
         // Intercept successful responses.
@@ -599,6 +602,25 @@ const INJECTED_JS = `
   log('info', 'Bridge installed');
   _postMessage({ type: 'BRIDGE_READY' });
 
+  // Send auth JWT to native immediately so the player can call getMuxToken
+  // directly when the WebView is backgrounded (avoids backgrounded HTTP fetch).
+  (function _sendJwtToNative() {
+    var jwt = _getLocalStorageJwt();
+    if (jwt) {
+      _postMessage({ type: 'AUTH_JWT', jwt: jwt });
+      log('info', 'AUTH_JWT sent to native (' + jwt.length + ' chars)');
+    } else {
+      // Retry after localStorage may have been populated by the app.
+      setTimeout(function() {
+        var j = _getLocalStorageJwt();
+        if (j) {
+          _postMessage({ type: 'AUTH_JWT', jwt: j });
+          log('info', 'AUTH_JWT sent to native (delayed, ' + j.length + ' chars)');
+        }
+      }, 2000);
+    }
+  })();
+
   // Check current URL in case the WebView was restored on a chapter URL.
   setTimeout(checkUrl, 800);
   true;
@@ -776,6 +798,13 @@ export default function ExploreScreen() {
           Alert.alert('Download failed', String(msg.error ?? 'Could not fetch tokens for download'));
           break;
 
+        case 'AUTH_JWT':
+          if (typeof msg.jwt === 'string' && msg.jwt.length > 50) {
+            _storeAuthJwt(msg.jwt);
+            console.log(`[explore] AUTH_JWT stored (${(msg.jwt as string).length} chars)`);
+          }
+          break;
+
         default:
           // Unknown message types are silently discarded.
           break;
@@ -860,6 +889,23 @@ let _tokenRequester: ((chapterId: string) => void) | null = null;
 
 function _setTokenRequester(fn: ((chapterId: string) => void) | null): void {
   _tokenRequester = fn;
+}
+
+// ─── Auth JWT store ───────────────────────────────────────────────────────────
+//
+// The injected JS sends the user's auth JWT via AUTH_JWT message while the
+// WebView is in the foreground.  Native stores it here so the player can call
+// getMuxToken directly (with Authorization header) when the WebView is
+// backgrounded and postMessage is suppressed by Android.
+
+let _authJwt: string | null = null;
+
+function _storeAuthJwt(jwt: string): void {
+  _authJwt = jwt;
+}
+
+export function getAuthJwt(): string | null {
+  return _authJwt;
 }
 
 /**

@@ -38,9 +38,12 @@ import Video, { type DRMType, type ReactVideoSource, type VideoRef } from 'react
 import {
   type Chapter,
   type MuxTokenResponse,
+  fetchChapter,
+  selectMuxPlaybackId,
+  getMuxTokenWithJwt,
 } from '../../api/base44Client';
 import { waitForPlayerData, type BridgeResult } from '../../api/playerCache';
-import { requestWebViewTokens } from '../(tabs)/explore';
+import { requestWebViewTokens, getAuthJwt } from '../(tabs)/explore';
 import IcareOfflineDrm, {
   onDownloadProgress,
   type DownloadInfo,
@@ -488,6 +491,20 @@ export default function ChapterPlayerScreen() {
     if (tokens) {
       console.log(`[player] resolveTokens: FAST-PATH — returning tokens from state for ${chapterId}`);
       return tokens;
+    }
+
+    // JWT-direct path: use the auth JWT captured from the WebView while it was
+    // foregrounded to call getMuxToken natively — bypasses backgrounded WebView
+    // entirely. Needed for re-download / license renewal from offline mode.
+    const jwt = getAuthJwt();
+    if (jwt) {
+      console.log(`[player] resolveTokens: JWT-PATH — fetching chapter + getMuxToken natively for ${chapterId}`);
+      const { data: ch } = await fetchChapter(chapterId!);
+      const playbackId = selectMuxPlaybackId(ch);
+      if (!playbackId) throw new Error('Chapter has no Mux playback ID');
+      const tk = await getMuxTokenWithJwt(playbackId, jwt);
+      console.log(`[player] resolveTokens: JWT-PATH success`);
+      return tk;
     }
 
     // Slow path: only reached when player opened without prior token delivery

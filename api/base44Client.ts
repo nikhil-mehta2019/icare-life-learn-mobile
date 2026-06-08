@@ -213,6 +213,29 @@ export async function getMuxToken(playbackId: string): Promise<MuxTokenResponse>
 }
 
 /**
+ * Get Mux tokens using an explicit auth JWT (bypasses WebView session cookies).
+ * Used when the WebView is backgrounded and postMessage is suppressed by Android.
+ */
+export async function getMuxTokenWithJwt(
+  playbackId: string,
+  jwt: string
+): Promise<MuxTokenResponse> {
+  const response = await fetch(`${BASE_URL}/functions/getMuxToken`, {
+    method: 'POST',
+    headers: {
+      ...defaultHeaders,
+      'Authorization': `Bearer ${jwt}`,
+    },
+    body: JSON.stringify({ playbackId }),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error((data as any)?.error ?? `getMuxToken failed (${response.status})`);
+  }
+  return data as MuxTokenResponse;
+}
+
+/**
  * Resolve whether the authenticated student has access to a course.
  * Requires the student to be logged in via the WebView session cookie.
  */

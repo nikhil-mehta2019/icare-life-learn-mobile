@@ -36,19 +36,22 @@
         "expo-build-properties",
         {
           "android": {
-            "minSdkVersion": 24,
-            "compileSdkVersion": 34,
-            "targetSdkVersion": 34,
-            "extraMavenRepos": [],
-            "newArchEnabled": false
+              "minSdkVersion": 24,
+              "compileSdkVersion": 36,
+              "targetSdkVersion": 36,
+              "buildToolsVersion": "36.0.0",
+              "extraMavenRepos": [],
+              "newArchEnabled": false
           },
           "ios": {
-            "deploymentTarget": "15.1",
+            "deploymentTarget": "16.4",
             "newArchEnabled": false
           }
         }
       ],
-      "./modules/icare-offline-drm/app.plugin.js"
+      "./modules/icare-offline-drm/app.plugin.js",
+      "expo-secure-store",
+      "expo-web-browser"
     ],
     "android": {
       "adaptiveIcon": {
