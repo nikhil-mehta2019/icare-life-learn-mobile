@@ -14,8 +14,10 @@ import java.util.TimeZone
  */
 object DownloadMetadata {
   private const val PREFS_NAME = "icare_download_meta"
-  private const val PREFIX_TITLE = "title_"
+  private const val PREFIX_TITLE        = "title_"
   private const val PREFIX_COMPLETED_AT = "completed_at_"
+  private const val PREFIX_THUMBNAIL    = "thumbnail_"
+  private const val PREFIX_DURATION     = "duration_"
 
   private fun prefs(ctx: Context): SharedPreferences =
     ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -45,6 +47,31 @@ object DownloadMetadata {
 
   fun removeCompletedAt(ctx: Context, id: String) {
     prefs(ctx).edit().remove(PREFIX_COMPLETED_AT + id).apply()
+  }
+
+  fun saveThumbnailUrl(ctx: Context, id: String, url: String) {
+    prefs(ctx).edit().putString(PREFIX_THUMBNAIL + id, url).apply()
+  }
+
+  fun getThumbnailUrl(ctx: Context, id: String): String? =
+    prefs(ctx).getString(PREFIX_THUMBNAIL + id, null)
+
+  fun removeThumbnailUrl(ctx: Context, id: String) {
+    prefs(ctx).edit().remove(PREFIX_THUMBNAIL + id).apply()
+  }
+
+  fun saveDuration(ctx: Context, id: String, seconds: Int) {
+    prefs(ctx).edit().putInt(PREFIX_DURATION + id, seconds).apply()
+  }
+
+  fun getDuration(ctx: Context, id: String): Int? {
+    val p = prefs(ctx)
+    val key = PREFIX_DURATION + id
+    return if (p.contains(key)) p.getInt(key, 0) else null
+  }
+
+  fun removeDuration(ctx: Context, id: String) {
+    prefs(ctx).edit().remove(PREFIX_DURATION + id).apply()
   }
 
   private fun isoNow(): String {

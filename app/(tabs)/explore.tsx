@@ -489,6 +489,9 @@ const INJECTED_JS = `
   }
 
   // Separate fetch path for download — posts DOWNLOAD_CHAPTER (not OPEN_CHAPTER).
+  // Uses /functions/getMuxDownloadToken → iCare /download endpoint so that
+  // DRM chapters receive a manifest URL with Widevine PSSH and a persistent
+  // offline license token (drm_offline=true), not the signed streaming manifest.
   function _doDownloadFetch(chapterId, btn) {
     var key = _apiKey;
     var api = _baseApi;
@@ -519,19 +522,23 @@ const INJECTED_JS = `
           if (jwt) { muxHdrs['Authorization'] = 'Bearer ' + jwt; }
         }
 
-        return fetchJsonWithTimeout('getMuxToken', api + '/functions/getMuxToken', {
+        return fetchJsonWithTimeout('getMuxDownloadToken', api + '/functions/getMuxDownloadToken', {
           method: 'POST',
           headers: muxHdrs,
           credentials: 'include',
           body: JSON.stringify({ playbackId: playbackId }),
         }, FETCH_TIMEOUT_MS).then(function(r) {
           if (!r.ok) return r.json().catch(function(){return{};}).then(function(eb){
-            throw new Error(eb.error || ('getMuxToken failed (' + r.status + ')'));
+            throw new Error(eb.error || ('getMuxDownloadToken failed (' + r.status + ')'));
           });
           return r.json();
-        }).then(function(tokens) {
+        }).then(function(dlTokens) {
+          log('info', '[OFFLINE-DRM] playbackId=' + playbackId
+            + ' drmEnabled=' + dlTokens.drmEnabled
+            + ' manifestUrl=' + (dlTokens.manifestUrl || 'null')
+            + ' widevineLicenseUrl=' + (dlTokens.widevineLicenseUrl || 'null'));
           _postMessage({ type: 'DOWNLOAD_CHAPTER', chapterId: chapterId,
-                         chapter: chapter, tokens: tokens });
+                         chapter: chapter, dlTokens: dlTokens });
           if (btn) { btn.textContent = '✓ Queued'; btn.style.background = '#2e7d32'; }
           setTimeout(function() { _resetDownloadBtn(); }, 3000);
         });
@@ -777,14 +784,28 @@ export default function ExploreScreen() {
             break;
           }
           const dlChapter = msg.chapter as any;
-          const dlTokens  = msg.tokens  as any;
-          console.log(`[explore] DOWNLOAD_CHAPTER — starting offline download for chapter ${chapterId}`);
+          const dlTokens  = msg.dlTokens  as any;
+          console.log(`[explore] DOWNLOAD_CHAPTER — starting offline download for chapter ${chapterId} drmEnabled=${dlTokens?.drmEnabled}`);
+          // Base44 Chapter entity uses 'title'; fall back through 'name' / 'label'
+          // before using the raw ID. Log the chapter object to diagnose field names.
+          console.log(`[explore] DOWNLOAD_CHAPTER chapter fields: ${JSON.stringify(Object.keys(dlChapter ?? {}))}`);
+          console.log(`[explore] DOWNLOAD_CHAPTER chapter.title=${dlChapter?.title} chapter.name=${dlChapter?.name}`);
+          const chapterTitle: string =
+            dlChapter?.title || dlChapter?.name || dlChapter?.label || chapterId;
+          const thumbnailUrl: string | undefined =
+            dlChapter?.videoPosterUrl || dlChapter?.thumbnailUrl || dlChapter?.posterUrl || undefined;
+          const durationSeconds: number | undefined =
+            dlChapter?.estimatedMinutes
+              ? Math.round(dlChapter.estimatedMinutes * 60)
+              : undefined;
           IcareOfflineDrm.startDownload({
             id:            chapterId,
-            manifestUrl:   dlTokens.secureStreamUrl,
-            drmLicenseUrl: dlTokens.drmLicenseUrl,
-            drmToken:      dlTokens.drmToken,
-            title:         dlChapter?.title ?? chapterId,
+            manifestUrl:   dlTokens.manifestUrl,
+            drmLicenseUrl: dlTokens.widevineLicenseUrl ?? '',
+            drmToken:      dlTokens.drmToken ?? '',
+            title:         chapterTitle,
+            thumbnailUrl,
+            durationSeconds,
           }).catch((err: any) => {
             console.error(`[explore] Download failed for chapter ${chapterId}:`, err);
             Alert.alert('Download failed', err?.message ?? String(err));

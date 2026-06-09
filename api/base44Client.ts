@@ -103,6 +103,14 @@ export interface MuxTokenResponse {
   secureStreamUrl: string;
 }
 
+/** Response from getMuxDownloadToken() — used exclusively for offline downloads. */
+export interface MuxDownloadTokenResponse {
+  drmEnabled: boolean;
+  manifestUrl: string;
+  drmToken: string | null;
+  widevineLicenseUrl: string | null;
+}
+
 export interface StudentAccessResponse {
   hasCourseAccess: boolean;
   courseAccessReason?: string;
@@ -210,6 +218,35 @@ export function selectMuxPlaybackId(chapter: Chapter): string | null {
  */
 export async function getMuxToken(playbackId: string): Promise<MuxTokenResponse> {
   return apiPost<MuxTokenResponse>('/functions/getMuxToken', { playbackId }, true);
+}
+
+/**
+ * Get Mux offline download tokens for a chapter.
+ * Calls /functions/getMuxDownloadToken → iCare play API /download endpoint.
+ * Returns a DRM manifest URL + persistent Widevine license token for DRM chapters,
+ * or a plain manifest URL for signed-only chapters.
+ * NEVER used for online streaming — online playback always uses getMuxToken().
+ */
+export async function getMuxDownloadToken(
+  playbackId: string,
+  jwt?: string
+): Promise<MuxDownloadTokenResponse> {
+  if (jwt) {
+    const response = await fetch(`${BASE_URL}/functions/getMuxDownloadToken`, {
+      method: 'POST',
+      headers: {
+        ...defaultHeaders,
+        'Authorization': `Bearer ${jwt}`,
+      },
+      body: JSON.stringify({ playbackId }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error((data as any)?.error ?? `getMuxDownloadToken failed (${response.status})`);
+    }
+    return data as MuxDownloadTokenResponse;
+  }
+  return apiPost<MuxDownloadTokenResponse>('/functions/getMuxDownloadToken', { playbackId }, true);
 }
 
 /**

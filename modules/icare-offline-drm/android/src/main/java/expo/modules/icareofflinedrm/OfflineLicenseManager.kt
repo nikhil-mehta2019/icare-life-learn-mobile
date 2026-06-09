@@ -4,16 +4,17 @@ import android.content.Context
 import android.media.MediaDrm
 import android.util.Base64
 import androidx.media3.common.C
+import androidx.media3.common.DrmInitData
+import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
-import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.drm.DefaultDrmSessionManager
 import androidx.media3.exoplayer.drm.DrmSessionEventListener
 import androidx.media3.exoplayer.drm.FrameworkMediaDrm
 import androidx.media3.exoplayer.drm.HttpMediaDrmCallback
 import androidx.media3.exoplayer.drm.OfflineLicenseHelper
-import androidx.media3.exoplayer.offline.DownloadHelper
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 
@@ -147,72 +148,236 @@ object OfflineLicenseManager {
     prefs(ctx).edit().remove(KEY_PREFIX + downloadId).apply()
   }
 
+  /**
+   * Fetches the manifest, checks for a real Widevine PSSH, acquires an offline
+   * license if found, and returns true. Returns false if the manifest has no
+   * Widevine encryption (signed-only stream) — caller should then build the
+   * DownloadHelper MediaItem without DRM config.
+   */
   fun acquireAndStore(
     ctx: Context,
     downloadId: String,
     manifestUrl: String,
     licenseUrl: String,
     licenseToken: String,
-  ) {
-    // Fast-fail: if Widevine DRM is unavailable on this device (not provisioned,
-    // HAL missing, or security-level check failing) throw immediately instead of
-    // waiting 30 s for DownloadHelper.prepare() to time out.
+  ): Boolean {
     if (!isWidevineAvailable()) {
       throw IllegalStateException(
         "Widevine DRM is not available on this device — offline download of DRM-protected content is not supported"
       )
     }
 
-    val httpFactory = DefaultHttpDataSource.Factory().setUserAgent("IcareLifeLearn/1.0")
-
-    // Attach Widevine DRM configuration to the MediaItem so ExoPlayer's
-    // DownloadHelper can properly initialise the DRM session during prepare().
-    // Without this, ExoPlayer encounters the PSSH/DRM init data in the Mux HLS
-    // manifest and hangs waiting for a license server that was never configured,
-    // causing the 30 s "DownloadHelper prep timed out" error.
-    val drmConfigBuilder = MediaItem.DrmConfiguration.Builder(C.WIDEVINE_UUID)
-      .setLicenseUri(licenseUrl)
-    if (licenseToken.isNotEmpty()) {
-      drmConfigBuilder.setLicenseRequestHeaders(mapOf("x-mux-license-token" to licenseToken))
+    android.util.Log.d("IcareOfflineDrm", "fetchPsshFromManifest:\nmanifestUrl=$manifestUrl")
+    val psshBytes = fetchPsshFromManifest(manifestUrl)
+    if (psshBytes == null) {
+      android.util.Log.w("IcareOfflineDrm", "no Widevine SESSION-KEY found")
+      return false
     }
-    val mediaItem = MediaItem.Builder()
-      .setMediaId(downloadId)
-      .setUri(manifestUrl)
-      .setDrmConfiguration(drmConfigBuilder.build())
+    android.util.Log.d("IcareOfflineDrm", "found Widevine SESSION-KEY")
+
+    val drmInitData = DrmInitData(
+      DrmInitData.SchemeData(C.WIDEVINE_UUID, MimeTypes.VIDEO_MP4, psshBytes)
+    )
+    val format = Format.Builder()
+      .setSampleMimeType(MimeTypes.VIDEO_H264)
+      .setDrmInitData(drmInitData)
       .build()
 
-    val helper = DownloadHelper.forMediaItem(
-      ctx, mediaItem, DefaultRenderersFactory(ctx), httpFactory,
-    )
-
-    val latch = java.util.concurrent.CountDownLatch(1)
-    val errRef = java.util.concurrent.atomic.AtomicReference<Throwable?>()
-    helper.prepare(object : DownloadHelper.Callback {
-      override fun onPrepared(h: DownloadHelper) { latch.countDown() }
-      override fun onPrepareError(h: DownloadHelper, e: java.io.IOException) {
-        errRef.set(e); latch.countDown()
-      }
-    })
-    if (!latch.await(8, java.util.concurrent.TimeUnit.SECONDS))
-      throw java.io.IOException("DownloadHelper prep timed out (8 s) — DRM or network unavailable")
-    errRef.get()?.let { throw it }
-
-    val format = findDrmFormat(helper) ?: run {
-      helper.release()
-      throw IllegalStateException("No DRM Format found in $manifestUrl")
-    }
-
+    android.util.Log.d("IcareOfflineDrm",
+      "acquireLicense: psshBytes=${psshBytes.size}B licenseUrl=$licenseUrl drmTokenPresent=${licenseToken.isNotEmpty()}")
     val offlineHelper = newOfflineHelper(licenseUrl, licenseToken)
+    android.util.Log.d("IcareOfflineDrm", "acquireLicense: calling downloadLicense() …")
     val keySetId = try {
-      offlineHelper.downloadLicense(format)
+      val ks = offlineHelper.downloadLicense(format)
+      android.util.Log.d("IcareOfflineDrm", "offline license acquired — keySetId ${ks.size} bytes")
+      ks
+    } catch (e: Throwable) {
+      android.util.Log.e("IcareOfflineDrm",
+        "offline license acquisition FAILED — ${e::class.simpleName}: ${e.message}", e)
+      throw e
     } finally {
-      offlineHelper.release()
-      helper.release()
+      try { offlineHelper.release() } catch (_: Throwable) {}
     }
 
+    android.util.Log.d("IcareOfflineDrm", "acquireLicense: persisting keySetId for downloadId=$downloadId")
     prefs(ctx).edit()
       .putString(KEY_PREFIX + downloadId, Base64.encodeToString(keySetId, Base64.NO_WRAP))
       .apply()
+    android.util.Log.d("IcareOfflineDrm", "acquireLicense: keySetId persisted — acquireAndStore returning true")
+    return true
+  }
+
+  private fun fetchUrl(url: String): Pair<Int, String?> {
+    val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+    conn.connectTimeout = 15_000
+    conn.readTimeout    = 15_000
+    conn.setRequestProperty("User-Agent", "IcareLifeLearn/1.0")
+    conn.connect()
+    val code = conn.responseCode
+    val body = if (code in 200..299) conn.inputStream.bufferedReader().readText() else null
+    conn.disconnect()
+    return Pair(code, body)
+  }
+
+  private fun logDrmLines(tag: String, label: String, body: String) {
+    val keywords = listOf("EXT-X-SESSION-KEY", "EXT-X-KEY", "KEYFORMAT", "URI=", "edef8ba9", "widevine")
+    val lines = body.lines()
+    val matches = lines.filter { line -> keywords.any { line.contains(it, ignoreCase = true) } }
+    if (matches.isEmpty()) {
+      android.util.Log.w(tag, "$label: no DRM-related lines found")
+    } else {
+      android.util.Log.d(tag, "$label: ${matches.size} DRM-related line(s):\n${matches.joinToString("\n")}")
+    }
+  }
+
+  private fun extractPssh(body: String): ByteArray? {
+    val TAG = "IcareOfflineDrm"
+
+    // Primary: scan the entire body for a data-URI PSSH — no line splitting,
+    // no UUID search, no tag matching. This token is unique to DRM PSSH payloads
+    // in HLS and cannot appear elsewhere in a valid manifest.
+    val dataUriMatch = Regex(
+      """data:text/plain[^,]*,([A-Za-z0-9+/=]+)""",
+      RegexOption.IGNORE_CASE
+    ).find(body)
+
+    if (dataUriMatch != null) {
+      val b64 = dataUriMatch.groupValues[1]
+      android.util.Log.d(TAG, "extractPssh: regex match found")
+      android.util.Log.d(TAG, "extractPssh: base64 length=${b64.length}")
+      return try {
+        val bytes = Base64.decode(b64, Base64.DEFAULT)
+        android.util.Log.d(TAG, "extractPssh: decoded PSSH bytes=${bytes.size}")
+        bytes
+      } catch (e: Throwable) {
+        android.util.Log.e(TAG, "extractPssh: Base64 decode failed — ${e.message}")
+        null
+      }
+    }
+
+    // Fallback: UUID present but no data-URI (e.g. bare base64 or external key URL).
+    // Find the nearest URI="..." value after the Widevine UUID.
+    val widevineUuid = "edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"
+    val uuidIdx = body.indexOf(widevineUuid, ignoreCase = true)
+    if (uuidIdx >= 0) {
+      val uriMatch = Regex("""URI="([^"]+)"""").find(body)
+      if (uriMatch != null) {
+        val uriVal = uriMatch.groupValues[1]
+        val b64 = if (uriVal.startsWith("data:")) uriVal.substringAfter("base64,") else uriVal
+        android.util.Log.d(TAG, "extractPssh: fallback URI match, base64 length=${b64.length}")
+        return try {
+          val bytes = Base64.decode(b64, Base64.DEFAULT)
+          android.util.Log.d(TAG, "extractPssh: decoded PSSH bytes=${bytes.size}")
+          bytes
+        } catch (e: Throwable) {
+          android.util.Log.e(TAG, "extractPssh: fallback Base64 decode failed — ${e.message}")
+          null
+        }
+      }
+    }
+
+    android.util.Log.w(TAG, "extractPssh: no PSSH found in body (length=${body.length})")
+    return null
+  }
+
+  /**
+   * Fetches the HLS master manifest, dumps it fully for diagnosis, follows every
+   * variant playlist URL, and searches all of them for a Widevine PSSH.
+   *
+   * Mux may place the EXT-X-SESSION-KEY in the master playlist OR the media playlist.
+   * This function checks both levels exhaustively and logs everything it finds.
+   */
+  private fun fetchPsshFromManifest(manifestUrl: String): ByteArray? {
+    val TAG = "IcareOfflineDrm"
+    try {
+      // ── 1. Fetch master playlist ─────────────────────────────────────────────
+      android.util.Log.d(TAG, "fetchPsshFromManifest: fetching master → $manifestUrl")
+      val (masterCode, masterBody) = fetchUrl(manifestUrl)
+      android.util.Log.d(TAG, "fetchPsshFromManifest: master HTTP $masterCode")
+      if (masterCode !in 200..299 || masterBody == null) {
+        android.util.Log.e(TAG, "fetchPsshFromManifest: master fetch failed — HTTP $masterCode")
+        return null
+      }
+
+      // ── 2. Dump full master playlist ─────────────────────────────────────────
+      // Logcat truncates at ~4 KB; chunk into 3000-char blocks so nothing is lost.
+      val masterLines = masterBody.lines()
+      android.util.Log.d(TAG, "fetchPsshFromManifest: master playlist — ${masterLines.size} lines, ${masterBody.length} chars")
+      masterBody.chunked(3000).forEachIndexed { i, chunk ->
+        android.util.Log.d(TAG, "MASTER[$i]:\n$chunk")
+      }
+
+      // ── 3. Log DRM-related lines in master ───────────────────────────────────
+      logDrmLines(TAG, "master", masterBody)
+
+      // ── 4. Try to extract PSSH directly from master ──────────────────────────
+      val masterPssh = extractPssh(masterBody)
+      if (masterPssh != null) {
+        android.util.Log.d(TAG, "fetchPsshFromManifest: PSSH found in master playlist")
+        return masterPssh
+      }
+      android.util.Log.d(TAG, "fetchPsshFromManifest: no PSSH in master — will inspect variant playlists")
+
+      // ── 5. Collect variant playlist URLs from master ─────────────────────────
+      // A master playlist line is a variant URL if it follows an #EXT-X-STREAM-INF
+      // tag or if it ends with .m3u8 (some Mux manifests omit the tag on the URL line).
+      val variantUrls = mutableListOf<String>()
+      var nextIsVariant = false
+      val baseUrl = manifestUrl.substringBeforeLast('/')
+      for (line in masterLines) {
+        val trimmed = line.trim()
+        if (trimmed.startsWith("#EXT-X-STREAM-INF") || trimmed.startsWith("#EXT-X-I-FRAME-STREAM-INF")) {
+          nextIsVariant = true
+          continue
+        }
+        if (nextIsVariant && trimmed.isNotEmpty() && !trimmed.startsWith('#')) {
+          val url = if (trimmed.startsWith("http")) trimmed else "$baseUrl/$trimmed"
+          variantUrls.add(url)
+          nextIsVariant = false
+          continue
+        }
+        if (!trimmed.startsWith('#') && trimmed.endsWith(".m3u8")) {
+          val url = if (trimmed.startsWith("http")) trimmed else "$baseUrl/$trimmed"
+          if (url !in variantUrls) variantUrls.add(url)
+        }
+        nextIsVariant = false
+      }
+      android.util.Log.d(TAG, "fetchPsshFromManifest: found ${variantUrls.size} variant playlist URL(s)")
+      variantUrls.forEachIndexed { i, u -> android.util.Log.d(TAG, "  variant[$i]: $u") }
+
+      // ── 6. Fetch each variant playlist and search for PSSH ───────────────────
+      for ((idx, variantUrl) in variantUrls.withIndex()) {
+        try {
+          android.util.Log.d(TAG, "fetchPsshFromManifest: fetching variant[$idx] → $variantUrl")
+          val (vCode, vBody) = fetchUrl(variantUrl)
+          android.util.Log.d(TAG, "fetchPsshFromManifest: variant[$idx] HTTP $vCode")
+          if (vCode !in 200..299 || vBody == null) {
+            android.util.Log.w(TAG, "fetchPsshFromManifest: variant[$idx] fetch failed — skipping")
+            continue
+          }
+          val vLines = vBody.lines()
+          android.util.Log.d(TAG, "fetchPsshFromManifest: variant[$idx] — ${vLines.size} lines, ${vBody.length} chars")
+          // Dump full variant for diagnosis
+          vBody.chunked(3000).forEachIndexed { i, chunk ->
+            android.util.Log.d(TAG, "VARIANT[$idx][$i]:\n$chunk")
+          }
+          logDrmLines(TAG, "variant[$idx]", vBody)
+          val pssh = extractPssh(vBody)
+          if (pssh != null) {
+            android.util.Log.d(TAG, "fetchPsshFromManifest: PSSH found in variant[$idx]")
+            return pssh
+          }
+        } catch (e: Throwable) {
+          android.util.Log.w(TAG, "fetchPsshFromManifest: variant[$idx] exception — ${e::class.simpleName}: ${e.message}")
+        }
+      }
+
+      android.util.Log.w(TAG, "fetchPsshFromManifest: no PSSH found in master or any variant playlist")
+      return null
+    } catch (e: Throwable) {
+      android.util.Log.e("IcareOfflineDrm", "fetchPsshFromManifest: exception — ${e::class.simpleName}: ${e.message}")
+      return null
+    }
   }
 
   private fun newOfflineHelper(licenseUrl: String, licenseToken: String?): OfflineLicenseHelper {
@@ -233,20 +398,4 @@ object OfflineLicenseManager {
     )
   }
 
-  private fun findDrmFormat(helper: DownloadHelper): androidx.media3.common.Format? {
-    for (periodIdx in 0 until helper.periodCount) {
-      val mappedTrackInfo = helper.getMappedTrackInfo(periodIdx)
-      for (rendererIdx in 0 until mappedTrackInfo.rendererCount) {
-        val groups = mappedTrackInfo.getTrackGroups(rendererIdx)
-        for (g in 0 until groups.length) {
-          val tg = groups[g]
-          for (t in 0 until tg.length) {
-            val f = tg.getFormat(t)
-            if (f.drmInitData != null) return f
-          }
-        }
-      }
-    }
-    return null
-  }
 }

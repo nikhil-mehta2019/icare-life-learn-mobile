@@ -16,7 +16,7 @@
 
 console.log('[build] iCare player offline-learning-center active');
 
-import { useIsFocused } from '@react-navigation/native';
+import { useIsFocused } from 'expo-router';
 import * as FileSystem from 'expo-file-system';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -41,6 +41,7 @@ import {
   fetchChapter,
   selectMuxPlaybackId,
   getMuxTokenWithJwt,
+  getMuxDownloadToken,
 } from '../../api/base44Client';
 import { waitForPlayerData, type BridgeResult } from '../../api/playerCache';
 import { requestWebViewTokens, getAuthJwt } from '../(tabs)/explore';
@@ -375,13 +376,22 @@ export default function ChapterPlayerScreen() {
         console.log(`[player] initialLoad: offlineSource=${off ? 'FOUND' : 'null'} dlInfo=${dlInfo ? dlInfo.state : 'null'}`);
 
         if (off) {
-          // Build chapter entirely from local storage — no fetchChapter() call.
+          // Offline DRM path: launch native ExoPlayer Activity with the persisted
+          // keySetId. react-native-video does not support offline DRM license restore
+          // (its DRMProps parser ignores offlineLicense and requires licenseServer).
+          console.log(`[player] initialLoad: offline copy found — launching native OfflinePlayerActivity`);
           const ch = dlInfo ? chapterFromDownload(chapterId, dlInfo) : { _id: chapterId, title: chapterId } as unknown as Chapter;
           setChapter(ch);
-          setOffline(off);
           setDownload(dlInfo);
-          setMode('offline');
-          console.log(`[player] initialLoad: → mode=offline (tokens NOT set — offline path)`);
+          try {
+            await IcareOfflineDrm.launchOfflinePlayer(chapterId);
+            // Activity launched — go back so the downloads screen is visible behind it.
+            if (!cancelled) router.back();
+          } catch (launchErr: any) {
+            console.error(`[player] launchOfflinePlayer failed: ${launchErr?.message}`);
+            // Fall through to show error — don't try streaming if device is offline.
+            throw launchErr;
+          }
           return;
         }
 
@@ -439,6 +449,7 @@ export default function ChapterPlayerScreen() {
   useEffect(() => {
     if (!chapterId) return;
     const sub = onDownloadProgress((evt) => {
+      console.log(`[player] onDownloadProgress id=${evt.id} state=${evt.state} bytes=${evt.bytesDownloaded} pct=${evt.percentDownloaded?.toFixed(1)}`);
       if (evt.id === chapterId) setDownload(evt);
     });
     IcareOfflineDrm.getDownload(chapterId).then((d) => { if (d) setDownload(d); });
@@ -532,10 +543,8 @@ export default function ChapterPlayerScreen() {
   // ── download handler ──
   const handleDownload = useCallback(async () => {
     if (!chapter || !chapterId) return;
-    // Guard: prevent concurrent executions from double-tap.
     if (isDownloadPending) return;
 
-    console.log(`[player] handleDownload: START — chapterId=${chapterId} tokens=${tokens ? 'SET' : 'NULL'} mode=${mode}`);
     setIsDownloadPending(true);
     try {
       // Storage pre-check: require at least 500 MB free before starting.
@@ -554,31 +563,44 @@ export default function ChapterPlayerScreen() {
         // Storage check failed — proceed anyway, ExoPlayer will catch a full disk.
       }
 
-      console.log(`[player] handleDownload: calling resolveTokens…`);
-      const tk = await resolveTokens();
-      console.log(`[player] handleDownload: resolveTokens returned ${tk ? 'tokens' : 'null'}`);
-
-      if (!tk) {
-        Alert.alert('Download failed', 'Please return to the course page and try again.');
+      // Offline download always uses the /download endpoint so DRM chapters receive
+      // a Widevine-PSSH-bearing manifest and a persistent offline license token.
+      // selectMuxPlaybackId() picks DRM > Signed > Public — same priority as streaming.
+      const playbackId = selectMuxPlaybackId(chapter);
+      if (!playbackId) {
+        Alert.alert('Download failed', 'Chapter has no Mux playback ID.');
         return;
       }
 
-      console.log(`[player] handleDownload: calling IcareOfflineDrm.startDownload for ${chapterId}`);
+      const jwt = getAuthJwt();
+      const dlTokens = await getMuxDownloadToken(playbackId, jwt ?? undefined);
+
+      console.log(
+        `[OFFLINE-DRM]\nchapterId=${chapterId}\nplaybackId=${playbackId}` +
+        `\nmanifestUrl=${dlTokens.manifestUrl ?? 'null'}` +
+        `\ndrmLicenseUrl=${dlTokens.widevineLicenseUrl ?? 'null'}` +
+        `\ndrmTokenPresent=${!!dlTokens.drmToken}`
+      );
+
+      if (!dlTokens.manifestUrl) {
+        Alert.alert('Download failed', 'Could not resolve manifest URL for this chapter.');
+        return;
+      }
+
       await IcareOfflineDrm.startDownload({
-        id: chapterId,
-        manifestUrl: tk.secureStreamUrl,
-        drmLicenseUrl: tk.drmLicenseUrl,
-        drmToken: tk.drmToken,
-        title: chapter.title,
+        id:            chapterId,
+        manifestUrl:   dlTokens.manifestUrl,
+        drmLicenseUrl: dlTokens.widevineLicenseUrl ?? '',
+        drmToken:      dlTokens.drmToken ?? '',
+        title:         chapter.title,
       });
-      console.log(`[player] handleDownload: startDownload call returned (download queued)`);
     } catch (err: any) {
       console.error(`[player] handleDownload: FAILED — ${err?.message}`);
       Alert.alert('Download failed', err?.message ?? String(err));
     } finally {
       setIsDownloadPending(false);
     }
-  }, [chapter, chapterId, isDownloadPending, resolveTokens, tokens, mode]);
+  }, [chapter, chapterId, isDownloadPending]);
 
   // ── delete-download handler ──
   // Uses resolveTokens() so the fast-path (tokens already in state) is taken

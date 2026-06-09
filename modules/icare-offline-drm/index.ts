@@ -20,8 +20,10 @@ export interface DownloadInfo {
   percentDownloaded: number;   // 0..100, -1 if unknown
   failureReason?: string | null;
   // ── enriched fields (set by Kotlin toMap) ──
-  title?: string | null;       // human-readable chapter title
-  downloadedAt?: string | null; // ISO-8601 timestamp when download completed
+  title?: string | null;           // human-readable chapter title
+  downloadedAt?: string | null;    // ISO-8601 timestamp when download completed
+  thumbnailUrl?: string | null;    // poster image URL
+  durationSeconds?: number | null; // video duration in seconds
 }
 
 export interface StartDownloadParams {
@@ -33,8 +35,12 @@ export interface StartDownloadParams {
   drmLicenseUrl: string;
   /** Widevine license token — `drmToken` from getMuxToken. Sent as `x-mux-license-token` header. */
   drmToken: string;
-  /** Optional human title for the notification + downloads UI. */
+  /** Human-readable chapter title for the notification + downloads UI. */
   title?: string;
+  /** Thumbnail/poster image URL for the downloads UI card. */
+  thumbnailUrl?: string;
+  /** Chapter duration in seconds (from estimatedMinutes * 60). */
+  durationSeconds?: number;
 }
 
 export interface PlaybackSourceParams {
@@ -131,6 +137,17 @@ export const IcareOfflineDrm = {
   async getStorageStats(): Promise<StorageStats> {
     if (Platform.OS !== 'android') return { usedBytes: 0, downloadCount: 0 };
     return NativeModule.getStorageStats();
+  },
+
+  /**
+   * Launch the native offline player Activity for a completed DRM download.
+   * Uses ExoPlayer with the persisted Widevine keySetId — bypasses react-native-video
+   * which does not support offline DRM license restore via keySetId.
+   * Throws if no completed download exists for this id.
+   */
+  async launchOfflinePlayer(id: string): Promise<void> {
+    ensureAndroid('launchOfflinePlayer');
+    return NativeModule.launchOfflinePlayer(id);
   },
 };
 

@@ -1,28 +1,12 @@
-/**
- * Download Center — full offline learning management screen.
- *
- * Sections:
- *   1. Storage summary header (used bytes, device free space, download count)
- *   2. Filter chips: All / Downloading / Downloaded / Expired / Failed
- *   3. Download list with per-item actions
- *
- * Each download card shows:
- *   - Chapter title (or ID fallback)
- *   - Status badge + progress bar
- *   - File size
- *   - Completed date
- *   - License status (Active / Expiring Soon / Expired)
- *   - Last watched position (from local progress store)
- *   - Actions: Play / Pause / Resume / Delete / Renew License
- */
-
 import * as FileSystem from 'expo-file-system';
 import { useRouter, type Href } from 'expo-router';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  FlatList,
+  Animated,
+  Modal,
+  Platform,
   Pressable,
   RefreshControl,
   ScrollView,
@@ -33,425 +17,580 @@ import {
 import IcareOfflineDrm, {
   onDownloadProgress,
   type DownloadInfo,
-  type StorageStats,
 } from '../../modules/icare-offline-drm';
 import { getAllProgress, type ChapterProgress } from '../../store/offlineProgress';
 
-// ─── Types ─────────────────────────────────────────────────────────────────────
+// ─── Constants ──────────────────────────────────────────────────────────────────
 
-type FilterTab = 'all' | 'downloading' | 'downloaded' | 'failed';
+const BRAND = '#1D3D47';
+const BRAND_LIGHT = '#2A5568';
+const BG = '#0F1923';
+const CARD_BG = '#1C2B35';
+const SURFACE = '#243344';
+const TEXT = '#F0F4F8';
+const TEXT_MUTED = '#8A9BB0';
+const ACCENT = '#4FC3F7';
+const SUCCESS = '#66BB6A';
+const WARN = '#FFA726';
+const DANGER = '#EF5350';
 
-// ─── Helpers ───────────────────────────────────────────────────────────────────
+// ─── Helpers ────────────────────────────────────────────────────────────────────
 
-function formatBytes(bytes: number): string {
-  if (bytes <= 0) return '0 B';
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+function fmtBytes(b: number): string {
+  if (b <= 0) return '0 B';
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(0)} KB`;
+  if (b < 1024 * 1024 * 1024) return `${(b / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(b / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
-function formatDate(iso: string | null | undefined): string {
-  if (!iso) return '—';
+function fmtDuration(sec: number): string {
+  if (sec <= 0) return '';
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function fmtDate(iso: string | null | undefined): string {
+  if (!iso) return '';
   try {
-    const d = new Date(iso);
-    return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
-  } catch {
-    return '—';
-  }
+    return new Date(iso).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+  } catch { return ''; }
 }
 
-function formatDuration(seconds: number): string {
-  if (seconds <= 0) return '0:00';
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return `${m}:${s.toString().padStart(2, '0')}`;
+function licenseAge(downloadedAt: string | null | undefined): 'active' | 'expiring' | 'expired' {
+  if (!downloadedAt) return 'active';
+  const ageMs = Date.now() - new Date(downloadedAt).getTime();
+  const thirtyD = 30 * 24 * 60 * 60 * 1000;
+  const fiveD = 5 * 24 * 60 * 60 * 1000;
+  if (ageMs > thirtyD) return 'expired';
+  if (ageMs > thirtyD - fiveD) return 'expiring';
+  return 'active';
 }
 
-/** Mux offline DRM licenses are 30-day by default. We flag "expiring soon" at 5 days. */
-function licenseStatus(downloadedAt: string | null | undefined): 'active' | 'expiring' | 'expired' | 'unknown' {
-  if (!downloadedAt) return 'unknown';
-  try {
-    const acquired = new Date(downloadedAt).getTime();
-    const now = Date.now();
-    const ageMs = now - acquired;
-    const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
-    const fiveDaysMs = 5 * 24 * 60 * 60 * 1000;
-    if (ageMs > thirtyDaysMs) return 'expired';
-    if (ageMs > thirtyDaysMs - fiveDaysMs) return 'expiring';
-    return 'active';
-  } catch {
-    return 'unknown';
-  }
+// Extract a "course name" from the chapter title.
+// Titles look like "Course Name – Chapter N" or "Course Name: Chapter N".
+// If no separator, every chapter is its own group.
+function courseKey(title: string | null | undefined): string {
+  if (!title) return '__ungrouped__';
+  const sep = title.indexOf(' – ') !== -1 ? ' – ' : title.indexOf(': ') !== -1 ? ': ' : null;
+  return sep ? title.split(sep)[0].trim() : title.trim();
 }
 
-function licenseExpiresLabel(downloadedAt: string | null | undefined): string {
-  if (!downloadedAt) return '';
-  try {
-    const acquired = new Date(downloadedAt).getTime();
-    const expiresAt = new Date(acquired + 30 * 24 * 60 * 60 * 1000);
-    return `Expires ${expiresAt.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`;
-  } catch {
-    return '';
-  }
-}
-
-// ─── StorageSummary ────────────────────────────────────────────────────────────
-
-function StorageSummary({ stats, freeBytes }: { stats: StorageStats; freeBytes: number }) {
-  const LOW_STORAGE_THRESHOLD = 2 * 1024 * 1024 * 1024; // 2 GB
-  const isLow = freeBytes > 0 && freeBytes < LOW_STORAGE_THRESHOLD;
-
-  return (
-    <View style={summaryStyles.card}>
-      <Text style={summaryStyles.heading}>Downloads Storage</Text>
-      <View style={summaryStyles.row}>
-        <View style={summaryStyles.stat}>
-          <Text style={summaryStyles.value}>{formatBytes(stats.usedBytes)}</Text>
-          <Text style={summaryStyles.label}>Used</Text>
-        </View>
-        <View style={summaryStyles.divider} />
-        <View style={summaryStyles.stat}>
-          <Text style={[summaryStyles.value, isLow && summaryStyles.valueWarn]}>
-            {freeBytes > 0 ? formatBytes(freeBytes) : '—'}
-          </Text>
-          <Text style={summaryStyles.label}>Available</Text>
-        </View>
-        <View style={summaryStyles.divider} />
-        <View style={summaryStyles.stat}>
-          <Text style={summaryStyles.value}>{stats.downloadCount}</Text>
-          <Text style={summaryStyles.label}>{stats.downloadCount === 1 ? 'Video' : 'Videos'}</Text>
-        </View>
-      </View>
-      {isLow && (
-        <View style={summaryStyles.warningBanner}>
-          <Text style={summaryStyles.warningText}>
-            ⚠ Less than 2 GB storage remaining. Delete unused downloads to free space.
-          </Text>
-        </View>
-      )}
-    </View>
-  );
-}
-
-const summaryStyles = StyleSheet.create({
-  card: {
-    backgroundColor: '#1D3D47',
-    borderRadius: 14,
-    padding: 16,
-    margin: 12,
-    marginBottom: 4,
-  },
-  heading: { color: '#fff', fontSize: 15, fontWeight: '700', marginBottom: 12 },
-  row: { flexDirection: 'row', justifyContent: 'space-around' },
-  stat: { alignItems: 'center', flex: 1 },
-  value: { color: '#fff', fontSize: 20, fontWeight: '700' },
-  valueWarn: { color: '#FFD54F' },
-  label: { color: 'rgba(255,255,255,0.65)', fontSize: 12, marginTop: 2 },
-  divider: { width: 1, backgroundColor: 'rgba(255,255,255,0.2)', marginHorizontal: 4 },
-  warningBanner: {
-    marginTop: 12,
-    backgroundColor: 'rgba(255,213,79,0.15)',
-    borderRadius: 8,
-    padding: 10,
-    borderLeftWidth: 3,
-    borderLeftColor: '#FFD54F',
-  },
-  warningText: { color: '#FFD54F', fontSize: 12, lineHeight: 17 },
-});
-
-// ─── FilterChips ───────────────────────────────────────────────────────────────
-
-function FilterChips({
-  active,
-  counts,
-  onChange,
-}: {
-  active: FilterTab;
-  counts: Record<FilterTab, number>;
-  onChange: (t: FilterTab) => void;
-}) {
-  const tabs: { key: FilterTab; label: string }[] = [
-    { key: 'all', label: 'All' },
-    { key: 'downloading', label: 'Downloading' },
-    { key: 'downloaded', label: 'Downloaded' },
-    { key: 'failed', label: 'Failed' },
-  ];
-  return (
-    <ScrollView
-      horizontal
-      showsHorizontalScrollIndicator={false}
-      contentContainerStyle={chipStyles.row}
-    >
-      {tabs.map((t) => (
-        <Pressable
-          key={t.key}
-          style={[chipStyles.chip, active === t.key && chipStyles.chipActive]}
-          onPress={() => onChange(t.key)}
-        >
-          <Text style={[chipStyles.label, active === t.key && chipStyles.labelActive]}>
-            {t.label}
-            {counts[t.key] > 0 ? ` (${counts[t.key]})` : ''}
-          </Text>
-        </Pressable>
-      ))}
-    </ScrollView>
-  );
-}
-
-const chipStyles = StyleSheet.create({
-  row: { paddingHorizontal: 12, paddingVertical: 8, gap: 8 },
-  chip: {
-    paddingHorizontal: 14,
-    paddingVertical: 7,
-    borderRadius: 20,
-    backgroundColor: '#f0f0f0',
-  },
-  chipActive: { backgroundColor: '#1D3D47' },
-  label: { fontSize: 13, color: '#555', fontWeight: '500' },
-  labelActive: { color: '#fff' },
-});
-
-// ─── ProgressBar ───────────────────────────────────────────────────────────────
-
-function ProgressBar({ pct }: { pct: number }) {
-  const w = Math.max(0, Math.min(100, pct));
-  return (
-    <View style={pbStyles.track}>
-      <View style={[pbStyles.fill, { width: `${w}%` as any }]} />
-    </View>
-  );
-}
-
-const pbStyles = StyleSheet.create({
-  track: { height: 4, backgroundColor: '#e0e0e0', borderRadius: 2, marginTop: 6 },
-  fill: { height: 4, backgroundColor: '#2196F3', borderRadius: 2 },
-});
-
-// ─── LicenseBadge ──────────────────────────────────────────────────────────────
-
-function LicenseBadge({ status }: { status: ReturnType<typeof licenseStatus> }) {
-  const config = {
-    active: { label: 'License Active', bg: '#E8F5E9', color: '#2E7D32' },
-    expiring: { label: 'Expiring Soon', bg: '#FFF8E1', color: '#F57F17' },
-    expired: { label: 'License Expired', bg: '#FFEBEE', color: '#C62828' },
-    unknown: { label: 'License Unknown', bg: '#F5F5F5', color: '#757575' },
-  }[status];
-  return (
-    <View style={[lbStyles.badge, { backgroundColor: config.bg }]}>
-      <Text style={[lbStyles.text, { color: config.color }]}>{config.label}</Text>
-    </View>
-  );
-}
-
-const lbStyles = StyleSheet.create({
-  badge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6, alignSelf: 'flex-start' },
-  text: { fontSize: 11, fontWeight: '600' },
-});
-
-// ─── DownloadCard ──────────────────────────────────────────────────────────────
-
-interface DownloadCardProps {
-  item: DownloadInfo;
+interface EnrichedDownload extends DownloadInfo {
   progress: ChapterProgress | null;
-  onPlay: () => void;
-  onPause: () => void;
-  onResume: () => void;
-  onDelete: () => void;
-  onRenew: () => void;
+  licStatus: 'active' | 'expiring' | 'expired';
 }
 
-function DownloadCard({
-  item,
-  progress,
-  onPlay,
-  onPause,
-  onResume,
-  onDelete,
-  onRenew,
-}: DownloadCardProps) {
-  const title = item.title ?? item.id;
-  const licStat = licenseStatus(item.downloadedAt);
-  const isCompleted = item.state === 'completed';
-  const isDownloading = item.state === 'downloading';
-  const isQueued = item.state === 'queued' || item.state === 'restarting';
-  const isStopped = item.state === 'stopped';
-  const isFailed = item.state === 'failed';
+// ─── Thumbnail Placeholder ──────────────────────────────────────────────────────
 
-  const pct = item.percentDownloaded >= 0 ? item.percentDownloaded : 0;
-
+function Thumbnail({ size, isActive }: { size: number; isActive?: boolean }) {
   return (
-    <View style={cardStyles.card}>
-      {/* Title */}
-      <Text style={cardStyles.title} numberOfLines={2}>{title}</Text>
-
-      {/* Status line */}
-      <View style={cardStyles.statusRow}>
-        <View style={[cardStyles.dot, { backgroundColor: statusColor(item.state) }]} />
-        <Text style={cardStyles.statusText}>{stateLabel(item)}</Text>
-      </View>
-
-      {/* Progress bar while downloading */}
-      {(isDownloading || isQueued) && pct > 0 && <ProgressBar pct={pct} />}
-
-      {/* Metadata row */}
-      <View style={cardStyles.metaRow}>
-        {item.contentLength > 0 && (
-          <Text style={cardStyles.meta}>{formatBytes(item.bytesDownloaded)} / {formatBytes(item.contentLength)}</Text>
-        )}
-        {isCompleted && item.downloadedAt && (
-          <Text style={cardStyles.meta}>Downloaded {formatDate(item.downloadedAt)}</Text>
-        )}
-      </View>
-
-      {/* License + expiry */}
-      {isCompleted && (
-        <View style={cardStyles.licenseRow}>
-          <LicenseBadge status={licStat} />
-          {licStat !== 'expired' && (
-            <Text style={cardStyles.expiryText}>{licenseExpiresLabel(item.downloadedAt)}</Text>
-          )}
+    <View style={[thumbStyles.box, { width: size, height: size * 0.5625 }]}>
+      <View style={thumbStyles.gradient} />
+      <Text style={thumbStyles.icon}>🎬</Text>
+      {isActive && (
+        <View style={thumbStyles.playBadge}>
+          <Text style={thumbStyles.playBadgeText}>▶</Text>
         </View>
       )}
+    </View>
+  );
+}
 
-      {/* Last watched position */}
-      {progress && progress.watchedSeconds > 0 && (
-        <Text style={cardStyles.meta}>
-          Last watched: {formatDuration(progress.watchedSeconds)}
-          {progress.percentWatched > 0 ? ` (${Math.round(progress.percentWatched)}%)` : ''}
+const thumbStyles = StyleSheet.create({
+  box: {
+    backgroundColor: SURFACE,
+    borderRadius: 8,
+    overflow: 'hidden',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  gradient: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(29,61,71,0.4)',
+  },
+  icon: { fontSize: 28 },
+  playBadge: {
+    position: 'absolute',
+    bottom: 6,
+    right: 6,
+    backgroundColor: ACCENT,
+    borderRadius: 12,
+    width: 24,
+    height: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  playBadgeText: { color: '#000', fontSize: 10, fontWeight: '900' },
+});
+
+// ─── Continue Watching row ──────────────────────────────────────────────────────
+
+function ContinueWatchingCard({
+  item,
+  onPress,
+}: {
+  item: EnrichedDownload;
+  onPress: () => void;
+}) {
+  const pct = item.progress ? Math.min(100, item.progress.percentWatched) : 0;
+  const title = item.title ?? item.id;
+
+  return (
+    <Pressable style={cwStyles.card} onPress={onPress} android_ripple={{ color: 'rgba(255,255,255,0.08)' }}>
+      <Thumbnail size={160} isActive />
+      {/* Progress bar overlay at bottom */}
+      <View style={cwStyles.progressTrack}>
+        <View style={[cwStyles.progressFill, { width: `${pct}%` as any }]} />
+      </View>
+      <Text style={cwStyles.title} numberOfLines={2}>{title}</Text>
+      {item.progress && item.progress.watchedSeconds > 0 && (
+        <Text style={cwStyles.meta}>
+          {fmtDuration(item.progress.watchedSeconds)} watched · {Math.round(pct)}%
         </Text>
       )}
+    </Pressable>
+  );
+}
 
-      {/* Action buttons */}
-      <View style={cardStyles.actions}>
-        {isCompleted && licStat !== 'expired' && (
-          <Pressable style={[cardStyles.btn, cardStyles.btnPrimary]} onPress={onPlay}>
-            <Text style={cardStyles.btnTextLight}>▶  Play Offline</Text>
+const cwStyles = StyleSheet.create({
+  card: {
+    width: 160,
+    marginRight: 12,
+  },
+  progressTrack: {
+    height: 3,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    borderRadius: 2,
+    marginTop: 0,
+  },
+  progressFill: {
+    height: 3,
+    backgroundColor: ACCENT,
+    borderRadius: 2,
+  },
+  title: {
+    color: TEXT,
+    fontSize: 12,
+    fontWeight: '600',
+    marginTop: 6,
+    lineHeight: 16,
+  },
+  meta: {
+    color: TEXT_MUTED,
+    fontSize: 10,
+    marginTop: 2,
+  },
+});
+
+// ─── Download Progress Card (for active/queued) ─────────────────────────────────
+
+function ActiveDownloadCard({
+  item,
+  onPause,
+  onResume,
+  onCancel,
+}: {
+  item: EnrichedDownload;
+  onPause: () => void;
+  onResume: () => void;
+  onCancel: () => void;
+}) {
+  const pct = item.percentDownloaded >= 0 ? item.percentDownloaded : 0;
+  const isDownloading = item.state === 'downloading';
+  const isFailed = item.state === 'failed';
+
+  return (
+    <View style={activeStyles.card}>
+      <Thumbnail size={72} />
+      <View style={activeStyles.content}>
+        <Text style={activeStyles.title} numberOfLines={2}>{item.title ?? item.id}</Text>
+        {isDownloading || item.state === 'queued' || item.state === 'stopped' ? (
+          <>
+            <View style={activeStyles.progressRow}>
+              <View style={activeStyles.track}>
+                <Animated.View style={[activeStyles.fill, { width: `${pct}%` as any }]} />
+              </View>
+              <Text style={activeStyles.pctText}>{Math.round(pct)}%</Text>
+            </View>
+            <Text style={activeStyles.meta}>
+              {fmtBytes(item.bytesDownloaded)}
+              {item.contentLength > 0 ? ` / ${fmtBytes(item.contentLength)}` : ''}
+              {item.state === 'queued' ? ' · Queued' : item.state === 'stopped' ? ' · Paused' : ''}
+            </Text>
+          </>
+        ) : isFailed ? (
+          <Text style={[activeStyles.meta, { color: DANGER }]}>Download failed</Text>
+        ) : null}
+        <View style={activeStyles.actions}>
+          {isDownloading && (
+            <Pressable style={activeStyles.actionBtn} onPress={onPause}>
+              <Text style={activeStyles.actionText}>⏸ Pause</Text>
+            </Pressable>
+          )}
+          {(item.state === 'queued' || item.state === 'stopped' || isFailed) && (
+            <Pressable style={activeStyles.actionBtn} onPress={onResume}>
+              <Text style={activeStyles.actionText}>▶ {isFailed ? 'Retry' : 'Resume'}</Text>
+            </Pressable>
+          )}
+          <Pressable style={[activeStyles.actionBtn, activeStyles.cancelBtn]} onPress={onCancel}>
+            <Text style={[activeStyles.actionText, { color: DANGER }]}>✕ Cancel</Text>
           </Pressable>
-        )}
-        {isDownloading && (
-          <Pressable style={[cardStyles.btn, cardStyles.btnSecondary]} onPress={onPause}>
-            <Text style={cardStyles.btnTextDark}>⏸  Pause</Text>
-          </Pressable>
-        )}
-        {(isQueued || isStopped) && (
-          <Pressable style={[cardStyles.btn, cardStyles.btnSecondary]} onPress={onResume}>
-            <Text style={cardStyles.btnTextDark}>▶  Resume</Text>
-          </Pressable>
-        )}
-        {isFailed && (
-          <Pressable style={[cardStyles.btn, cardStyles.btnSecondary]} onPress={onResume}>
-            <Text style={cardStyles.btnTextDark}>↺  Retry</Text>
-          </Pressable>
-        )}
-        {isCompleted && licStat === 'expired' && (
-          <Pressable style={[cardStyles.btn, cardStyles.btnSecondary]} onPress={onRenew}>
-            <Text style={cardStyles.btnTextDark}>↺  Renew License</Text>
-          </Pressable>
-        )}
-        {isCompleted && (licStat === 'expiring') && (
-          <Pressable style={[cardStyles.btn, cardStyles.btnWarn]} onPress={onRenew}>
-            <Text style={cardStyles.btnTextDark}>↺  Renew License</Text>
-          </Pressable>
-        )}
-        <Pressable style={[cardStyles.btn, cardStyles.btnDanger]} onPress={onDelete}>
-          <Text style={cardStyles.btnTextLight}>Delete</Text>
-        </Pressable>
+        </View>
       </View>
     </View>
   );
 }
 
-function statusColor(state: string): string {
-  switch (state) {
-    case 'completed': return '#4CAF50';
-    case 'downloading': return '#2196F3';
-    case 'queued': case 'restarting': return '#FF9800';
-    case 'failed': return '#F44336';
-    case 'stopped': return '#9E9E9E';
-    default: return '#9E9E9E';
-  }
-}
-
-function stateLabel(item: DownloadInfo): string {
-  switch (item.state) {
-    case 'completed': return 'Downloaded ✓';
-    case 'downloading':
-      return item.percentDownloaded >= 0
-        ? `Downloading ${Math.round(item.percentDownloaded)}%`
-        : 'Downloading…';
-    case 'queued': return 'Queued…';
-    case 'restarting': return 'Restarting…';
-    case 'stopped': return 'Paused';
-    case 'removing': return 'Removing…';
-    case 'failed': return `Failed${item.failureReason ? ': ' + item.failureReason : ''}`;
-    default: return item.state;
-  }
-}
-
-const cardStyles = StyleSheet.create({
+const activeStyles = StyleSheet.create({
   card: {
-    backgroundColor: '#fff',
+    flexDirection: 'row',
+    backgroundColor: CARD_BG,
     borderRadius: 12,
-    padding: 14,
-    marginBottom: 10,
-    elevation: 2,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.08,
-    shadowRadius: 4,
+    padding: 12,
+    marginBottom: 8,
+    gap: 12,
+    alignItems: 'flex-start',
   },
-  title: { fontSize: 14, fontWeight: '700', color: '#1a1a1a', lineHeight: 20, marginBottom: 6 },
-  statusRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 },
-  dot: { width: 8, height: 8, borderRadius: 4 },
-  statusText: { fontSize: 12, color: '#555' },
-  metaRow: { flexDirection: 'row', gap: 12, marginTop: 6, flexWrap: 'wrap' },
-  meta: { fontSize: 11, color: '#888' },
-  licenseRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 8 },
-  expiryText: { fontSize: 11, color: '#888' },
-  actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 12 },
-  btn: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8 },
-  btnPrimary: { backgroundColor: '#1D3D47' },
-  btnSecondary: { backgroundColor: '#f0f0f0' },
-  btnWarn: { backgroundColor: '#FFF8E1', borderWidth: 1, borderColor: '#FFB300' },
-  btnDanger: { backgroundColor: '#FFEBEE' },
-  btnTextLight: { color: '#fff', fontSize: 13, fontWeight: '600' },
-  btnTextDark: { color: '#333', fontSize: 13, fontWeight: '600' },
+  content: { flex: 1 },
+  title: { color: TEXT, fontSize: 13, fontWeight: '600', lineHeight: 18, marginBottom: 6 },
+  progressRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 },
+  track: { flex: 1, height: 4, backgroundColor: SURFACE, borderRadius: 2 },
+  fill: { height: 4, backgroundColor: ACCENT, borderRadius: 2 },
+  pctText: { color: ACCENT, fontSize: 11, fontWeight: '700', minWidth: 30 },
+  meta: { color: TEXT_MUTED, fontSize: 11, marginBottom: 8 },
+  actions: { flexDirection: 'row', gap: 8 },
+  actionBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: 6,
+    backgroundColor: SURFACE,
+  },
+  cancelBtn: { backgroundColor: 'transparent' },
+  actionText: { color: TEXT, fontSize: 12, fontWeight: '600' },
 });
 
-// ─── Main Screen ───────────────────────────────────────────────────────────────
+// ─── OTT Content Card (for completed downloads) ─────────────────────────────────
 
-export default function DownloadCenterScreen() {
+function ContentCard({
+  item,
+  onPress,
+  onMorePress,
+}: {
+  item: EnrichedDownload;
+  onPress: () => void;
+  onMorePress: () => void;
+}) {
+  const title = item.title ?? item.id;
+  const hasProgress = (item.progress?.percentWatched ?? 0) > 1;
+  const pct = hasProgress ? Math.min(100, item.progress!.percentWatched) : 0;
+
+  return (
+    <Pressable
+      style={ccStyles.card}
+      onPress={onPress}
+      android_ripple={{ color: 'rgba(255,255,255,0.06)' }}
+    >
+      <View style={ccStyles.thumbWrap}>
+        <Thumbnail size={110} />
+        {/* watch progress stripe */}
+        {hasProgress && (
+          <View style={ccStyles.progressTrack}>
+            <View style={[ccStyles.progressFill, { width: `${pct}%` as any }]} />
+          </View>
+        )}
+        {/* license badge */}
+        {item.licStatus === 'expiring' && (
+          <View style={[ccStyles.licBadge, { backgroundColor: WARN }]}>
+            <Text style={ccStyles.licBadgeText}>Expiring</Text>
+          </View>
+        )}
+        {item.licStatus === 'expired' && (
+          <View style={[ccStyles.licBadge, { backgroundColor: DANGER }]}>
+            <Text style={ccStyles.licBadgeText}>Expired</Text>
+          </View>
+        )}
+      </View>
+
+      <Text style={ccStyles.title} numberOfLines={2}>{title}</Text>
+
+      <View style={ccStyles.metaRow}>
+        {item.durationSeconds && item.durationSeconds > 0 ? (
+          <Text style={ccStyles.meta}>{fmtDuration(item.durationSeconds)}</Text>
+        ) : item.contentLength > 0 ? (
+          <Text style={ccStyles.meta}>{fmtBytes(item.contentLength)}</Text>
+        ) : null}
+        {item.downloadedAt && (
+          <Text style={ccStyles.meta}>· {fmtDate(item.downloadedAt)}</Text>
+        )}
+      </View>
+
+      <Pressable style={ccStyles.moreBtn} onPress={onMorePress} hitSlop={8}>
+        <Text style={ccStyles.moreBtnText}>•••</Text>
+      </Pressable>
+    </Pressable>
+  );
+}
+
+const ccStyles = StyleSheet.create({
+  card: {
+    width: 150,
+    marginRight: 12,
+  },
+  thumbWrap: { position: 'relative' },
+  progressTrack: {
+    height: 3,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    borderRadius: 2,
+  },
+  progressFill: {
+    height: 3,
+    backgroundColor: ACCENT,
+    borderRadius: 2,
+  },
+  licBadge: {
+    position: 'absolute',
+    top: 6,
+    left: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  licBadgeText: { color: '#fff', fontSize: 9, fontWeight: '700' },
+  title: { color: TEXT, fontSize: 12, fontWeight: '600', marginTop: 6, lineHeight: 16 },
+  metaRow: { flexDirection: 'row', gap: 4, marginTop: 3, flexWrap: 'wrap' },
+  meta: { color: TEXT_MUTED, fontSize: 10 },
+  moreBtn: {
+    marginTop: 4,
+    alignSelf: 'flex-start',
+    paddingHorizontal: 4,
+    paddingVertical: 2,
+  },
+  moreBtnText: { color: TEXT_MUTED, fontSize: 14, letterSpacing: 1, fontWeight: '900' },
+});
+
+// ─── Section Header ─────────────────────────────────────────────────────────────
+
+function SectionHeader({ title, count }: { title: string; count: number }) {
+  return (
+    <View style={shStyles.row}>
+      <Text style={shStyles.title}>{title}</Text>
+      <Text style={shStyles.count}>{count} {count === 1 ? 'video' : 'videos'}</Text>
+    </View>
+  );
+}
+
+const shStyles = StyleSheet.create({
+  row: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingTop: 20, paddingBottom: 8 },
+  title: { color: TEXT, fontSize: 15, fontWeight: '700', flex: 1 },
+  count: { color: TEXT_MUTED, fontSize: 12 },
+});
+
+// ─── Empty State ────────────────────────────────────────────────────────────────
+
+function EmptyState() {
+  return (
+    <View style={emptyStyles.box}>
+      <Text style={emptyStyles.icon}>⬇</Text>
+      <Text style={emptyStyles.heading}>No Downloads Yet</Text>
+      <Text style={emptyStyles.sub}>
+        Open a lesson from the Learn tab and tap{'\n'}
+        "Download for Offline Viewing" to watch{'\n'}
+        without internet.
+      </Text>
+    </View>
+  );
+}
+
+const emptyStyles = StyleSheet.create({
+  box: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 40 },
+  icon: { fontSize: 56, marginBottom: 16 },
+  heading: { color: TEXT, fontSize: 20, fontWeight: '700', marginBottom: 10 },
+  sub: { color: TEXT_MUTED, fontSize: 14, textAlign: 'center', lineHeight: 22 },
+});
+
+// ─── Manage Modal (bottom sheet) ────────────────────────────────────────────────
+
+interface ManageModalProps {
+  item: EnrichedDownload | null;
+  visible: boolean;
+  onClose: () => void;
+  onDismiss: () => void;
+  onDelete: (item: EnrichedDownload) => void;
+  onRenew: (item: EnrichedDownload) => void;
+  onPlay: (item: EnrichedDownload) => void;
+}
+
+function ManageModal({ item, visible, onClose, onDismiss, onDelete, onRenew, onPlay }: ManageModalProps) {
+  if (!item) return null;
+  const title = item.title ?? item.id;
+
+  return (
+    <Modal
+      visible={visible}
+      transparent
+      animationType="slide"
+      statusBarTranslucent
+      onRequestClose={onClose}
+      onDismiss={onDismiss}
+    >
+      <Pressable style={mmStyles.overlay} onPress={onClose} />
+      <View style={mmStyles.sheet}>
+        <View style={mmStyles.handle} />
+
+        <Text style={mmStyles.title} numberOfLines={2}>{title}</Text>
+
+        {item.contentLength > 0 && (
+          <Text style={mmStyles.sub}>{fmtBytes(item.contentLength)} · Downloaded {fmtDate(item.downloadedAt)}</Text>
+        )}
+
+        <View style={mmStyles.divider} />
+
+        {item.licStatus !== 'expired' && (
+          <Pressable style={mmStyles.row} onPress={() => onPlay(item)}>
+            <Text style={mmStyles.rowIcon}>▶</Text>
+            <Text style={mmStyles.rowLabel}>Play Offline</Text>
+          </Pressable>
+        )}
+
+        {(item.licStatus === 'expired' || item.licStatus === 'expiring') && (
+          <Pressable style={mmStyles.row} onPress={() => { onClose(); onRenew(item); }}>
+            <Text style={mmStyles.rowIcon}>↺</Text>
+            <Text style={[mmStyles.rowLabel, { color: item.licStatus === 'expired' ? DANGER : WARN }]}>
+              {item.licStatus === 'expired' ? 'License Expired — Renew' : 'Renew License (Expiring Soon)'}
+            </Text>
+          </Pressable>
+        )}
+
+        <Pressable style={mmStyles.row} onPress={() => { onClose(); onDelete(item); }}>
+          <Text style={[mmStyles.rowIcon, { color: DANGER }]}>🗑</Text>
+          <Text style={[mmStyles.rowLabel, { color: DANGER }]}>Delete Download</Text>
+        </Pressable>
+
+        <Pressable style={mmStyles.cancelRow} onPress={onClose}>
+          <Text style={mmStyles.cancelText}>Cancel</Text>
+        </Pressable>
+      </View>
+    </Modal>
+  );
+}
+
+const mmStyles = StyleSheet.create({
+  overlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+  },
+  sheet: {
+    backgroundColor: CARD_BG,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingTop: 12,
+    paddingBottom: Platform.OS === 'android' ? 24 : 36,
+    paddingHorizontal: 20,
+  },
+  handle: {
+    alignSelf: 'center',
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: SURFACE,
+    marginBottom: 16,
+  },
+  title: { color: TEXT, fontSize: 16, fontWeight: '700', marginBottom: 4 },
+  sub: { color: TEXT_MUTED, fontSize: 12, marginBottom: 12 },
+  divider: { height: 1, backgroundColor: SURFACE, marginBottom: 8 },
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 14,
+    gap: 16,
+  },
+  rowIcon: { fontSize: 18, width: 24, textAlign: 'center', color: TEXT },
+  rowLabel: { color: TEXT, fontSize: 15 },
+  cancelRow: { marginTop: 8, paddingVertical: 14, alignItems: 'center' },
+  cancelText: { color: TEXT_MUTED, fontSize: 15 },
+});
+
+// ─── Storage Bar ────────────────────────────────────────────────────────────────
+
+function StorageBar({ usedBytes, freeBytes, count }: { usedBytes: number; freeBytes: number; count: number }) {
+  const total = usedBytes + freeBytes;
+  const fillPct = total > 0 ? Math.min(100, (usedBytes / total) * 100) : 0;
+  const isLow = freeBytes > 0 && freeBytes < 2 * 1024 * 1024 * 1024;
+
+  return (
+    <View style={sbStyles.box}>
+      <View style={sbStyles.row}>
+        <Text style={sbStyles.label}>Storage</Text>
+        <Text style={sbStyles.right}>
+          {fmtBytes(usedBytes)} used · {count} {count === 1 ? 'video' : 'videos'}
+        </Text>
+      </View>
+      <View style={sbStyles.track}>
+        <View style={[sbStyles.fill, { width: `${fillPct}%` as any }, isLow && { backgroundColor: WARN }]} />
+      </View>
+      {isLow && <Text style={sbStyles.warn}>⚠ Less than 2 GB remaining</Text>}
+    </View>
+  );
+}
+
+const sbStyles = StyleSheet.create({
+  box: { marginHorizontal: 16, marginBottom: 4, marginTop: 8 },
+  row: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 },
+  label: { color: TEXT_MUTED, fontSize: 11, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.5 },
+  right: { color: TEXT_MUTED, fontSize: 11 },
+  track: { height: 4, backgroundColor: SURFACE, borderRadius: 2 },
+  fill: { height: 4, backgroundColor: ACCENT, borderRadius: 2 },
+  warn: { color: WARN, fontSize: 11, marginTop: 4 },
+});
+
+// ─── Main Screen ─────────────────────────────────────────────────────────────────
+
+type Section =
+  | { type: 'storage'; usedBytes: number; freeBytes: number; count: number }
+  | { type: 'continue'; items: EnrichedDownload[] }
+  | { type: 'active'; items: EnrichedDownload[] }
+  | { type: 'course'; course: string; items: EnrichedDownload[] }
+  | { type: 'empty' };
+
+export default function DownloadsScreen() {
   const router = useRouter();
   const [items, setItems] = useState<DownloadInfo[]>([]);
-  const [stats, setStats] = useState<StorageStats>({ usedBytes: 0, downloadCount: 0 });
-  const [freeBytes, setFreeBytes] = useState(0);
   const [progressMap, setProgressMap] = useState<Record<string, ChapterProgress>>({});
-  const [filter, setFilter] = useState<FilterTab>('all');
+  const [usedBytes, setUsedBytes] = useState(0);
+  const [freeBytes, setFreeBytes] = useState(0);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [modalItem, setModalItem] = useState<EnrichedDownload | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // pendingNavId: set before closing modal, consumed in onModalDismiss to
+  // navigate AFTER the modal is fully gone (avoids NavigationContainer crash on Android).
+  const pendingNavId = useRef<string | null>(null);
+
+  // ── Load ──
 
   const load = useCallback(async () => {
     try {
-      const [list, s, allProg] = await Promise.all([
+      const [list, allProg] = await Promise.all([
         IcareOfflineDrm.listDownloads(),
-        IcareOfflineDrm.getStorageStats(),
         getAllProgress(),
       ]);
       setItems(list);
-      setStats(s);
-
-      // Device free space via expo-file-system
-      try {
-        const fsInfo = await FileSystem.getFreeDiskStorageAsync();
-        setFreeBytes(typeof fsInfo === 'number' ? fsInfo : 0);
-      } catch {
-        setFreeBytes(0);
-      }
-
       const pm: Record<string, ChapterProgress> = {};
       for (const p of allProg) pm[p.chapterId] = p;
       setProgressMap(pm);
+
+      try {
+        const stats = await IcareOfflineDrm.getStorageStats();
+        setUsedBytes(stats.usedBytes);
+      } catch { /**/ }
+      try {
+        const f = await FileSystem.getFreeDiskStorageAsync();
+        setFreeBytes(typeof f === 'number' ? f : 0);
+      } catch { /**/ }
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -460,7 +599,8 @@ export default function DownloadCenterScreen() {
 
   useEffect(() => { load(); }, [load]);
 
-  // Live progress updates
+  // ── Live events ──
+
   useEffect(() => {
     const sub = onDownloadProgress((evt) => {
       setItems((prev) => {
@@ -470,162 +610,320 @@ export default function DownloadCenterScreen() {
         next[idx] = evt;
         return next;
       });
-      // Refresh stats when a download completes
       if (evt.state === 'completed') {
-        IcareOfflineDrm.getStorageStats().then(setStats).catch(() => {});
+        IcareOfflineDrm.getStorageStats()
+          .then((s) => setUsedBytes(s.usedBytes))
+          .catch(() => {});
       }
     });
     return () => sub.remove();
   }, []);
 
+  // ── Fallback poll when active downloads exist ──
+
+  useEffect(() => {
+    const hasActive = items.some(
+      (d) => d.state === 'downloading' || d.state === 'queued' || d.state === 'restarting'
+    );
+    if (hasActive && !pollRef.current) {
+      pollRef.current = setInterval(async () => {
+        const updated = await IcareOfflineDrm.listDownloads();
+        setItems((prev) => {
+          let changed = false;
+          const next = prev.map((p) => {
+            const u = updated.find((d) => d.id === p.id);
+            if (!u) return p;
+            if (u.bytesDownloaded !== p.bytesDownloaded || u.state !== p.state) {
+              changed = true; return u;
+            }
+            return p;
+          });
+          return changed ? next : prev;
+        });
+        const stillActive = updated.some(
+          (d) => d.state === 'downloading' || d.state === 'queued' || d.state === 'restarting'
+        );
+        if (!stillActive && pollRef.current) {
+          clearInterval(pollRef.current);
+          pollRef.current = null;
+          IcareOfflineDrm.getStorageStats().then((s) => setUsedBytes(s.usedBytes)).catch(() => {});
+        }
+      }, 3000);
+    }
+    if (!hasActive && pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    return () => {
+      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+    };
+  }, [items.length]);
+
   // ── Actions ──
 
-  const handleDelete = useCallback((id: string, title: string) => {
+  const navigateToPlayer = useCallback((id: string) => {
+    router.push({
+      pathname: '/player/[chapterId]',
+      params: { chapterId: id },
+    } as unknown as Href);
+  }, [router]);
+
+  // Called directly (no modal involved) — safe to navigate immediately.
+  const playChapter = useCallback((id: string) => {
+    navigateToPlayer(id);
+  }, [navigateToPlayer]);
+
+  // Called from inside ManageModal — close modal first, navigate after dismiss.
+  const playChapterFromModal = useCallback((id: string) => {
+    pendingNavId.current = id;
+    setModalItem(null);
+  }, []);
+
+  const onModalDismiss = useCallback(() => {
+    const id = pendingNavId.current;
+    pendingNavId.current = null;
+    if (id) navigateToPlayer(id);
+  }, [navigateToPlayer]);
+
+  const handleDelete = useCallback((item: EnrichedDownload) => {
     Alert.alert(
       'Delete Download',
-      `Remove "${title}" from offline storage?`,
+      `Remove "${item.title ?? item.id}" from offline storage?`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
           text: 'Delete',
           style: 'destructive',
           onPress: async () => {
-            await IcareOfflineDrm.removeDownload(id);
-            setItems((prev) => prev.filter((d) => d.id !== id));
-            IcareOfflineDrm.getStorageStats().then(setStats).catch(() => {});
+            await IcareOfflineDrm.removeDownload(item.id);
+            setItems((prev) => prev.filter((d) => d.id !== item.id));
+            IcareOfflineDrm.getStorageStats().then((s) => setUsedBytes(s.usedBytes)).catch(() => {});
           },
         },
       ]
     );
   }, []);
 
-  const handlePause = useCallback(async (id: string) => {
-    await IcareOfflineDrm.pauseDownload(id);
-  }, []);
-
-  const handleResume = useCallback(async (id: string) => {
-    await IcareOfflineDrm.resumeDownload(id);
-  }, []);
-
-  const handleRenew = useCallback((id: string) => {
-    // License renewal requires fresh DRM tokens from the WebView bridge.
-    // Navigate to the player for this chapter — the player handles token acquisition
-    // and exposes a Renew action when the license is expired.
+  const handleRenew = useCallback((item: EnrichedDownload) => {
     Alert.alert(
       'Renew License',
-      'Open this chapter to renew the offline license. You need an internet connection.',
+      'Open this chapter online to renew the offline license. An internet connection is required.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
           text: 'Open Chapter',
-          onPress: () =>
-            router.push({
-              pathname: '/player/[chapterId]',
-              params: { chapterId: id },
-            } as unknown as Href),
+          onPress: () => navigateToPlayer(item.id),
         },
       ]
     );
-  }, [router]);
+  }, [navigateToPlayer]);
 
-  // ── Filter ──
+  // ── Enrich ──
 
-  const counts: Record<FilterTab, number> = useMemo(() => {
-    const c = { all: items.length, downloading: 0, downloaded: 0, failed: 0 };
-    for (const d of items) {
-      if (d.state === 'downloading' || d.state === 'queued') c.downloading++;
-      else if (d.state === 'completed') c.downloaded++;
-      else if (d.state === 'failed') c.failed++;
+  const enriched: EnrichedDownload[] = useMemo(
+    () =>
+      items.map((d) => ({
+        ...d,
+        progress: progressMap[d.id] ?? null,
+        licStatus: licenseAge(d.downloadedAt),
+      })),
+    [items, progressMap]
+  );
+
+  // ── Build sections ──
+
+  const sections: Section[] = useMemo(() => {
+    const completed = enriched.filter((d) => d.state === 'completed');
+    const active = enriched.filter((d) => d.state !== 'completed');
+
+    if (enriched.length === 0) return [{ type: 'empty' }];
+
+    const result: Section[] = [];
+
+    result.push({ type: 'storage', usedBytes, freeBytes, count: completed.length });
+
+    // Continue Watching — completed chapters with >1% progress, sorted by last watched
+    const continueItems = completed
+      .filter((d) => (d.progress?.percentWatched ?? 0) > 1 && (d.progress?.percentWatched ?? 0) < 95)
+      .sort((a, b) => {
+        const ta = a.progress?.lastWatchedAt ?? '';
+        const tb = b.progress?.lastWatchedAt ?? '';
+        return tb.localeCompare(ta);
+      })
+      .slice(0, 10);
+
+    if (continueItems.length > 0) {
+      result.push({ type: 'continue', items: continueItems });
     }
-    return c;
-  }, [items]);
 
-  const filtered = useMemo(() => {
-    switch (filter) {
-      case 'downloading': return items.filter((d) => d.state === 'downloading' || d.state === 'queued' || d.state === 'stopped');
-      case 'downloaded': return items.filter((d) => d.state === 'completed');
-      case 'failed': return items.filter((d) => d.state === 'failed');
-      default: return items;
+    // Active downloads
+    if (active.length > 0) {
+      result.push({ type: 'active', items: active });
     }
-  }, [items, filter]);
 
-  // ── Render ──
+    // Completed grouped by course
+    const courseMap = new Map<string, EnrichedDownload[]>();
+    for (const d of completed) {
+      const key = courseKey(d.title);
+      const arr = courseMap.get(key) ?? [];
+      arr.push(d);
+      courseMap.set(key, arr);
+    }
+
+    for (const [course, courseItems] of courseMap.entries()) {
+      result.push({ type: 'course', course, items: courseItems });
+    }
+
+    return result;
+  }, [enriched, usedBytes, freeBytes]);
+
+  // ── Render section ──
+
+  const renderSection = useCallback((section: Section, index: number) => {
+    switch (section.type) {
+      case 'storage':
+        return (
+          <StorageBar
+            key="storage"
+            usedBytes={section.usedBytes}
+            freeBytes={section.freeBytes}
+            count={section.count}
+          />
+        );
+
+      case 'continue':
+        return (
+          <View key="continue">
+            <SectionHeader title="Continue Watching" count={section.items.length} />
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 8 }}
+            >
+              {section.items.map((item) => (
+                <ContinueWatchingCard
+                  key={item.id}
+                  item={item}
+                  onPress={() => playChapter(item.id)}
+                />
+              ))}
+            </ScrollView>
+          </View>
+        );
+
+      case 'active':
+        return (
+          <View key="active" style={{ paddingHorizontal: 16 }}>
+            <SectionHeader title="Downloading" count={section.items.length} />
+            {section.items.map((item) => (
+              <ActiveDownloadCard
+                key={item.id}
+                item={item}
+                onPause={() => IcareOfflineDrm.pauseDownload(item.id)}
+                onResume={() => IcareOfflineDrm.resumeDownload(item.id)}
+                onCancel={() => handleDelete(item)}
+              />
+            ))}
+          </View>
+        );
+
+      case 'course': {
+        const displayName =
+          section.course === '__ungrouped__' ? 'Downloaded Videos' : section.course;
+        return (
+          <View key={`course-${section.course}`}>
+            <SectionHeader title={displayName} count={section.items.length} />
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 12 }}
+            >
+              {section.items.map((item) => (
+                <ContentCard
+                  key={item.id}
+                  item={item}
+                  onPress={() => {
+                    if (item.licStatus === 'expired') {
+                      setModalItem(item);
+                    } else {
+                      playChapter(item.id);
+                    }
+                  }}
+                  onMorePress={() => setModalItem(item)}
+                />
+              ))}
+            </ScrollView>
+          </View>
+        );
+      }
+
+      case 'empty':
+        return <EmptyState key="empty" />;
+
+      default:
+        return null;
+    }
+  }, [playChapter, handleDelete]);
+
+  // ── Loading ──
 
   if (loading) {
     return (
-      <View style={screenStyles.center}>
-        <ActivityIndicator size="large" color="#1D3D47" />
+      <View style={screenStyles.loadingBox}>
+        <ActivityIndicator size="large" color={ACCENT} />
       </View>
     );
   }
 
   return (
     <View style={screenStyles.screen}>
-      {/* Storage summary */}
-      <StorageSummary stats={stats} freeBytes={freeBytes} />
+      {/* Header */}
+      <View style={screenStyles.header}>
+        <Text style={screenStyles.headerTitle}>My Downloads</Text>
+      </View>
 
-      {/* Filter chips */}
-      <FilterChips active={filter} counts={counts} onChange={setFilter} />
+      {/* Sections */}
+      <ScrollView
+        style={screenStyles.scroll}
+        contentContainerStyle={enriched.length === 0 ? screenStyles.scrollEmpty : screenStyles.scrollContent}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            tintColor={ACCENT}
+            colors={[ACCENT]}
+            onRefresh={() => { setRefreshing(true); load(); }}
+          />
+        }
+      >
+        {sections.map((s, i) => renderSection(s, i))}
+        <View style={{ height: 24 }} />
+      </ScrollView>
 
-      {/* Download list */}
-      {filtered.length === 0 ? (
-        <View style={screenStyles.emptyBox}>
-          {items.length === 0 ? (
-            <>
-              <Text style={screenStyles.emptyTitle}>No downloads yet</Text>
-              <Text style={screenStyles.muted}>
-                Open a lesson and tap "Download for Offline Viewing".
-              </Text>
-            </>
-          ) : (
-            <Text style={screenStyles.muted}>No downloads in this category.</Text>
-          )}
-        </View>
-      ) : (
-        <FlatList
-          data={filtered}
-          keyExtractor={(d) => d.id}
-          contentContainerStyle={screenStyles.list}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              colors={['#1D3D47']}
-              onRefresh={() => { setRefreshing(true); load(); }}
-            />
-          }
-          renderItem={({ item }) => (
-            <DownloadCard
-              item={item}
-              progress={progressMap[item.id] ?? null}
-              onPlay={() =>
-                router.push({
-                  pathname: '/player/[chapterId]',
-                  params: { chapterId: item.id },
-                } as unknown as Href)
-              }
-              onPause={() => handlePause(item.id)}
-              onResume={() => handleResume(item.id)}
-              onDelete={() => handleDelete(item.id, item.title ?? item.id)}
-              onRenew={() => handleRenew(item.id)}
-            />
-          )}
-        />
-      )}
+      {/* Manage modal — navigation happens in onDismiss, after modal is fully gone */}
+      <ManageModal
+        item={modalItem}
+        visible={modalItem !== null}
+        onClose={() => setModalItem(null)}
+        onDismiss={onModalDismiss}
+        onDelete={(item) => { setModalItem(null); handleDelete(item); }}
+        onRenew={(item) => { setModalItem(null); handleRenew(item); }}
+        onPlay={(item) => playChapterFromModal(item.id)}
+      />
     </View>
   );
 }
 
 const screenStyles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: '#F5F5F5' },
-  center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  list: { padding: 12, paddingTop: 8 },
-  emptyBox: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 32,
-    gap: 8,
+  screen: { flex: 1, backgroundColor: BG },
+  loadingBox: { flex: 1, backgroundColor: BG, alignItems: 'center', justifyContent: 'center' },
+  header: {
+    paddingTop: 16,
+    paddingBottom: 12,
+    paddingHorizontal: 16,
+    backgroundColor: BG,
   },
-  emptyTitle: { fontSize: 16, fontWeight: '600', color: '#333' },
-  muted: { fontSize: 13, color: '#888', textAlign: 'center', lineHeight: 19 },
+  headerTitle: { color: TEXT, fontSize: 26, fontWeight: '800', letterSpacing: -0.5 },
+  scroll: { flex: 1 },
+  scrollContent: { paddingBottom: 40 },
+  scrollEmpty: { flex: 1 },
 });

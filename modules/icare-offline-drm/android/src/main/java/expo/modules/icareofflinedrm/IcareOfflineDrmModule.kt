@@ -25,6 +25,8 @@ class StartDownloadParamsRecord : Record, Serializable {
   @Field var drmLicenseUrl: String = ""
   @Field var drmToken: String = ""
   @Field var title: String? = null
+  @Field var thumbnailUrl: String? = null
+  @Field var durationSeconds: Int? = null
 }
 
 class PlaybackSourceParamsRecord : Record, Serializable {
@@ -54,9 +56,15 @@ class IcareOfflineDrmModule : Module() {
         val ctx = appContext.reactContext
           ?: throw CodedException("ENO_CONTEXT", "Android context unavailable", null)
 
-        // 1) Persist the human title so downloads list can show it without a network call.
+        // 1) Persist metadata so the downloads list can show it without a network call.
         if (!params.title.isNullOrBlank()) {
           DownloadMetadata.saveTitle(ctx, params.id, params.title!!)
+        }
+        if (!params.thumbnailUrl.isNullOrBlank()) {
+          DownloadMetadata.saveThumbnailUrl(ctx, params.id, params.thumbnailUrl!!)
+        }
+        params.durationSeconds?.let { dur ->
+          if (dur > 0) DownloadMetadata.saveDuration(ctx, params.id, dur)
         }
 
         // 2) Acquire the offline Widevine license + persist its keySetId.
@@ -67,29 +75,16 @@ class IcareOfflineDrmModule : Module() {
         //    throws "DownloadHelper prep timed out".
         val isDrmProtected = !params.drmLicenseUrl.isNullOrEmpty()
         var widevineOk = OfflineLicenseManager.isWidevineAvailable()
-        android.util.Log.d("IcareOfflineDrm",
-          "startDownload: id=${params.id} isDrmProtected=$isDrmProtected " +
-          "licenseUrl='${params.drmLicenseUrl}' widevineAvailable=$widevineOk")
-
+        var manifestHasDrm = false
         if (isDrmProtected) {
-          // If Widevine check failed (commonly ERROR_DRM_NOT_PROVISIONED on MIUI devices),
-          // attempt automatic provisioning before giving up. The device's Widevine HAL may
-          // be present but simply missing its certificate — provisionDevice() fetches and
-          // installs it from Google's server, the same way Play Services does at first boot.
           if (!widevineOk) {
-            android.util.Log.d("IcareOfflineDrm", "startDownload: Widevine not ready — attempting auto-provisioning")
             val provisioned = OfflineLicenseManager.provisionDevice()
-            if (provisioned) {
-              widevineOk = OfflineLicenseManager.isWidevineAvailable()
-              android.util.Log.d("IcareOfflineDrm", "startDownload: post-provision widevineAvailable=$widevineOk")
-            }
+            if (provisioned) widevineOk = OfflineLicenseManager.isWidevineAvailable()
           }
           if (!widevineOk) {
-            throw IllegalStateException(
-              "Widevine DRM is not available on this device — cannot download DRM-protected content offline"
-            )
+            throw IllegalStateException("Widevine DRM is not available on this device")
           }
-          OfflineLicenseManager.acquireAndStore(
+          manifestHasDrm = OfflineLicenseManager.acquireAndStore(
             ctx,
             downloadId = params.id,
             manifestUrl = params.manifestUrl,
@@ -98,11 +93,7 @@ class IcareOfflineDrmModule : Module() {
           )
         }
 
-        // 3) Build the download request (HLS — Mux returns m3u8).
-        //    Only attach DRM config when the content is actually DRM-protected;
-        //    attaching DRM config for non-DRM content triggers Widevine HAL init
-        //    which hangs ("No supported hal instance found") and times out.
-        val mediaItemForHelper = if (isDrmProtected) {
+        val mediaItemForHelper = if (manifestHasDrm) {
           val drmCfg = MediaItem.DrmConfiguration.Builder(C.WIDEVINE_UUID)
             .setLicenseUri(params.drmLicenseUrl)
             .apply {
@@ -114,30 +105,47 @@ class IcareOfflineDrmModule : Module() {
           MediaItem.Builder()
             .setMediaId(params.id)
             .setUri(Uri.parse(params.manifestUrl))
+            .setMimeType("application/x-mpegURL")
             .setDrmConfiguration(drmCfg)
             .build()
         } else {
           MediaItem.Builder()
             .setMediaId(params.id)
             .setUri(Uri.parse(params.manifestUrl))
+            .setMimeType("application/x-mpegURL")
             .build()
         }
-        val helper = DownloadUtil.getDownloadHelperForMediaItem(ctx, mediaItemForHelper)
         val latch = java.util.concurrent.CountDownLatch(1)
         val prepErr = java.util.concurrent.atomic.AtomicReference<Throwable?>()
-        helper.prepare(object : androidx.media3.exoplayer.offline.DownloadHelper.Callback {
-          override fun onPrepared(h: androidx.media3.exoplayer.offline.DownloadHelper) { latch.countDown() }
-          override fun onPrepareError(h: androidx.media3.exoplayer.offline.DownloadHelper, e: java.io.IOException) {
-            prepErr.set(e); latch.countDown()
-          }
-        })
-        if (!latch.await(8, java.util.concurrent.TimeUnit.SECONDS))
-          throw java.io.IOException("DownloadHelper prep timed out (8 s) — DRM or network unavailable")
+        val downloadRequestRef = java.util.concurrent.atomic.AtomicReference<DownloadRequest?>()
+        val helperRef = java.util.concurrent.atomic.AtomicReference<androidx.media3.exoplayer.offline.DownloadHelper?>()
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+          try {
+            val helper = DownloadUtil.getDownloadHelperForMediaItem(ctx, mediaItemForHelper)
+            helperRef.set(helper)
+            helper.prepare(object : androidx.media3.exoplayer.offline.DownloadHelper.Callback {
+              override fun onPrepared(h: androidx.media3.exoplayer.offline.DownloadHelper, isEmpty: Boolean) {
+                try { downloadRequestRef.set(h.getDownloadRequest(params.id, null)) }
+                catch (e: Throwable) { prepErr.set(e) }
+                latch.countDown()
+              }
+              override fun onPrepareError(h: androidx.media3.exoplayer.offline.DownloadHelper, e: java.io.IOException) {
+                prepErr.set(e); latch.countDown()
+              }
+            })
+          } catch (e: Throwable) { prepErr.set(e); latch.countDown() }
+        }
+        if (!latch.await(10, java.util.concurrent.TimeUnit.SECONDS)) {
+          throw java.io.IOException("DownloadHelper prep timed out")
+        }
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+          helperRef.getAndSet(null)?.release()
+        }
         prepErr.get()?.let { throw it }
-        val downloadRequest: DownloadRequest = helper.getDownloadRequest(params.id, null)
-        helper.release()
+        val downloadRequest: DownloadRequest = downloadRequestRef.get()
+          ?: throw java.io.IOException("DownloadHelper produced no DownloadRequest")
 
-        // 4) Hand off to the DownloadService.
+        DownloadEventBridge.reset()
         DownloadService.sendAddDownload(
           ctx,
           OfflineDownloadService::class.java,
@@ -184,6 +192,8 @@ class IcareOfflineDrmModule : Module() {
       OfflineLicenseManager.release(ctx, id)
       DownloadMetadata.removeTitle(ctx, id)
       DownloadMetadata.removeCompletedAt(ctx, id)
+      DownloadMetadata.removeThumbnailUrl(ctx, id)
+      DownloadMetadata.removeDuration(ctx, id)
     }
 
     AsyncFunction("listDownloads") { promise: expo.modules.kotlin.Promise ->
@@ -225,11 +235,9 @@ class IcareOfflineDrmModule : Module() {
           promise.resolve(null)
           return@AsyncFunction
         }
+        // keySetId is null for signed-only (non-DRM) downloads — that's fine,
+        // the player uses the cached segments without a Widevine license.
         val keySetIdB64 = OfflineLicenseManager.getKeySetIdB64(ctx, params.id)
-        if (keySetIdB64 == null) {
-          promise.resolve(null)
-          return@AsyncFunction
-        }
         val out = mapOf(
           "cacheKey" to params.id,
           "uri" to download.request.uri.toString(),
@@ -259,6 +267,74 @@ class IcareOfflineDrmModule : Module() {
         promise.resolve(null)
       } catch (e: Throwable) {
         promise.reject("ERENEW_FAILED", e.message ?: "Unknown error", e)
+      }
+    }
+
+    AsyncFunction("getDownloadsDebug") { promise: expo.modules.kotlin.Promise ->
+      try {
+        val ctx = appContext.reactContext
+          ?: throw CodedException("ENO_CONTEXT", "Android context unavailable", null)
+        val mgr = DownloadUtil.getDownloadManager(ctx)
+        android.util.Log.d("IcareOfflineDrm",
+          "[DOWNLOAD-SERVICE] getDownloadsDebug dmIdentity=${System.identityHashCode(mgr)}")
+        val out = mutableListOf<Map<String, Any?>>()
+        val cursor: DownloadCursor = mgr.downloadIndex.getDownloads()
+        cursor.use {
+          while (cursor.moveToNext()) {
+            val d = cursor.download
+            val stateStr = when (d.state) {
+              Download.STATE_QUEUED      -> "QUEUED"
+              Download.STATE_DOWNLOADING -> "DOWNLOADING"
+              Download.STATE_COMPLETED   -> "COMPLETED"
+              Download.STATE_FAILED      -> "FAILED"
+              Download.STATE_REMOVING    -> "REMOVING"
+              Download.STATE_RESTARTING  -> "RESTARTING"
+              Download.STATE_STOPPED     -> "STOPPED"
+              else                       -> "UNKNOWN(${d.state})"
+            }
+            val pct = if (d.percentDownloaded.isNaN()) -1.0 else d.percentDownloaded.toDouble()
+            val entry = mapOf(
+              "downloadId"        to d.request.id,
+              "state"             to stateStr,
+              "bytesDownloaded"   to d.bytesDownloaded.toDouble(),
+              "contentLength"     to d.contentLength.toDouble(),
+              "percentDownloaded" to pct,
+            )
+            android.util.Log.d("IcareOfflineDrm",
+              "[DOWNLOAD-SERVICE] getDownloadsDebug: id=${d.request.id} state=$stateStr" +
+              " bytes=${d.bytesDownloaded} contentLength=${d.contentLength}" +
+              " pct=${"%.1f".format(pct)}")
+            out.add(entry)
+          }
+        }
+        android.util.Log.d("IcareOfflineDrm",
+          "[DOWNLOAD-SERVICE] getDownloadsDebug: downloadCount=${out.size}")
+        promise.resolve(mapOf("downloadCount" to out.size, "downloads" to out))
+      } catch (e: Throwable) {
+        promise.reject("EDEBUG_FAILED", e.message ?: "Unknown error", e)
+      }
+    }
+
+    AsyncFunction("launchOfflinePlayer") { id: String, promise: expo.modules.kotlin.Promise ->
+      try {
+        val ctx = appContext.reactContext
+          ?: throw CodedException("ENO_CONTEXT", "Android context unavailable", null)
+        val download = DownloadUtil.getDownloadManager(ctx).downloadIndex.getDownload(id)
+        if (download == null || download.state != androidx.media3.exoplayer.offline.Download.STATE_COMPLETED) {
+          throw CodedException("ENO_DOWNLOAD", "No completed download for id=$id", null)
+        }
+        val title = DownloadMetadata.getTitle(ctx, id) ?: id
+        val intent = android.content.Intent(ctx, OfflinePlayerActivity::class.java).apply {
+          addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+          putExtra(OfflinePlayerActivity.EXTRA_DOWNLOAD_ID, id)
+          putExtra(OfflinePlayerActivity.EXTRA_TITLE, title)
+        }
+        ctx.startActivity(intent)
+        promise.resolve(null)
+      } catch (e: CodedException) {
+        promise.reject(e)
+      } catch (e: Throwable) {
+        promise.reject("ELAUNCH_FAILED", e.message ?: "Unknown error", e)
       }
     }
 
@@ -314,6 +390,8 @@ class IcareOfflineDrmModule : Module() {
       "failureReason" to d.failureReason.takeIf { d.state == Download.STATE_FAILED }?.toString(),
       "title" to DownloadMetadata.getTitle(ctx, d.request.id),
       "downloadedAt" to DownloadMetadata.getCompletedAt(ctx, d.request.id),
+      "thumbnailUrl" to DownloadMetadata.getThumbnailUrl(ctx, d.request.id),
+      "durationSeconds" to DownloadMetadata.getDuration(ctx, d.request.id),
     )
   }
 }
