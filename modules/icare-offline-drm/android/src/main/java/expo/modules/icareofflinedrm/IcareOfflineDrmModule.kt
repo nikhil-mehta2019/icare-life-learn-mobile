@@ -3,6 +3,7 @@ package expo.modules.icareofflinedrm
 import android.net.Uri
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.offline.Download
 import androidx.media3.exoplayer.offline.DownloadCursor
@@ -125,7 +126,36 @@ class IcareOfflineDrmModule : Module() {
             helperRef.set(helper)
             helper.prepare(object : androidx.media3.exoplayer.offline.DownloadHelper.Callback {
               override fun onPrepared(h: androidx.media3.exoplayer.offline.DownloadHelper, isEmpty: Boolean) {
-                try { downloadRequestRef.set(h.getDownloadRequest(params.id, null)) }
+                try {
+                  // Use optimal track selection (one best rendition per audio/video group)
+                  // rather than letting the helper pick all renditions, which causes
+                  // duplicates in the offline player's track selector UI.
+                  val defaultParams = androidx.media3.exoplayer.offline.DownloadHelper
+                    .getDefaultTrackSelectorParameters(ctx)
+                  for (periodIndex in 0 until h.periodCount) {
+                    h.clearTrackSelections(periodIndex)
+                    h.replaceTrackSelections(periodIndex, defaultParams)
+                    // Text/subtitle tracks are excluded by the default selector.
+                    // Explicitly add every text track group so captions are downloaded.
+                    val tracks = h.getTrackGroups(periodIndex)
+                    for (group in tracks.groups) {
+                      if (group.type == C.TRACK_TYPE_TEXT && group.length > 0) {
+                        h.addTrackSelection(
+                          periodIndex,
+                          defaultParams.buildUpon()
+                            .addOverride(
+                              TrackSelectionOverride(
+                                group.mediaTrackGroup,
+                                (0 until group.length).toList(),
+                              )
+                            )
+                            .build()
+                        )
+                      }
+                    }
+                  }
+                  downloadRequestRef.set(h.getDownloadRequest(params.id, null))
+                }
                 catch (e: Throwable) { prepErr.set(e) }
                 latch.countDown()
               }

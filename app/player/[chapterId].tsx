@@ -593,6 +593,10 @@ export default function ChapterPlayerScreen() {
         drmLicenseUrl: dlTokens.widevineLicenseUrl ?? '',
         drmToken:      dlTokens.drmToken ?? '',
         title:         chapter.title,
+        thumbnailUrl:  (chapter as any).videoPosterUrl ?? undefined,
+        durationSeconds: (chapter as any).estimatedMinutes
+          ? Math.round((chapter as any).estimatedMinutes * 60)
+          : undefined,
       });
     } catch (err: any) {
       console.error(`[player] handleDownload: FAILED — ${err?.message}`);

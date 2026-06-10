@@ -45,7 +45,6 @@ function MyDownloadsBar({ state, navigation }: BottomTabBarProps) {
 const barStyles = StyleSheet.create({
   container: {
     backgroundColor: '#0F1923',
-    paddingHorizontal: 16,
     paddingTop: 10,
     paddingBottom: BOTTOM_INSET,
     borderTopWidth: StyleSheet.hairlineWidth,
@@ -63,7 +62,6 @@ const barStyles = StyleSheet.create({
     justifyContent: 'center',
     gap: 8,
     backgroundColor: '#FFFFFF',
-    borderRadius: 14,
     paddingVertical: 14,
   },
   icon: {

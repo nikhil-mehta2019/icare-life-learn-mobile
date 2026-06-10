@@ -76,6 +76,7 @@ class OfflinePlayerActivity : Activity() {
             FrameLayout.LayoutParams.MATCH_PARENT,
         )
         pv.useController = true
+        pv.setShowSubtitleButton(true)
         playerView = pv
         root.addView(pv)
 
@@ -185,7 +186,23 @@ class OfflinePlayerActivity : Activity() {
         val mediaSource = hlsFactory.createMediaSource(mediaItem)
 
         // ── Build ExoPlayer ──────────────────────────────────────────────────
-        val exo = ExoPlayer.Builder(this).build()
+        // Configure a DefaultTrackSelector so that:
+        //   • Text/subtitle tracks with no declared language are still selected
+        //     (setSelectUndeterminedTextLanguage) — fixes missing captions.
+        //   • Adaptive audio groups are presented as a single "Auto" entry in the
+        //     track-selector UI — reduces the duplicate-track clutter seen when
+        //     multiple bitrate variants of the same language are in the manifest.
+        val trackSelector = androidx.media3.exoplayer.trackselection.DefaultTrackSelector(this).apply {
+            setParameters(
+                buildUponParameters()
+                    .setSelectUndeterminedTextLanguage(true)
+                    .setAllowMultipleAdaptiveSelections(false)
+                    .build()
+            )
+        }
+        val exo = ExoPlayer.Builder(this)
+            .setTrackSelector(trackSelector)
+            .build()
         player = exo
         pv.player = exo
 
