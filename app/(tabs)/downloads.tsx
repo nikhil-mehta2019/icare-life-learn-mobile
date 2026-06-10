@@ -407,22 +407,46 @@ const shStyles = StyleSheet.create({
 function EmptyState() {
   return (
     <View style={emptyStyles.box}>
-      <Text style={emptyStyles.icon}>⬇</Text>
-      <Text style={emptyStyles.heading}>No Downloads Yet</Text>
+      <View style={emptyStyles.iconWrap}>
+        <Text style={emptyStyles.icon}>⬇</Text>
+      </View>
+      <Text style={emptyStyles.heading}>No Offline Videos Yet</Text>
       <Text style={emptyStyles.sub}>
-        Open a lesson from the Learn tab and tap{'\n'}
-        "Download for Offline Viewing" to watch{'\n'}
-        without internet.
+        Open any lesson, tap the{' '}
+        <Text style={emptyStyles.subBold}>↓ Download</Text>
+        {' '}button, and it will appear here for offline viewing — no internet needed.
       </Text>
+      <View style={emptyStyles.hint}>
+        <Text style={emptyStyles.hintText}>📚  Go to Learn → open a course → tap Download</Text>
+      </View>
     </View>
   );
 }
 
 const emptyStyles = StyleSheet.create({
-  box: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 40 },
-  icon: { fontSize: 56, marginBottom: 16 },
-  heading: { color: TEXT, fontSize: 20, fontWeight: '700', marginBottom: 10 },
-  sub: { color: TEXT_MUTED, fontSize: 14, textAlign: 'center', lineHeight: 22 },
+  box: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 36 },
+  iconWrap: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: 'rgba(79,195,247,0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 20,
+  },
+  icon: { fontSize: 32 },
+  heading: { color: TEXT, fontSize: 22, fontWeight: '800', marginBottom: 12, letterSpacing: -0.3 },
+  sub: { color: TEXT_MUTED, fontSize: 14, textAlign: 'center', lineHeight: 22, marginBottom: 24 },
+  subBold: { color: ACCENT, fontWeight: '700' },
+  hint: {
+    backgroundColor: 'rgba(79,195,247,0.08)',
+    borderRadius: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(79,195,247,0.18)',
+  },
+  hintText: { color: TEXT_MUTED, fontSize: 13, lineHeight: 18 },
 });
 
 // ─── Manage Modal (bottom sheet) ────────────────────────────────────────────────
@@ -931,6 +955,15 @@ export default function DownloadsScreen() {
     <View style={screenStyles.screen}>
       {/* Header */}
       <View style={screenStyles.header}>
+        <Pressable
+          style={screenStyles.backBtn}
+          onPress={() => router.navigate('/(tabs)/explore' as any)}
+          android_ripple={{ color: 'rgba(255,255,255,0.08)', borderless: true, radius: 22 }}
+          hitSlop={12}
+          accessibilityLabel="Back to Learn"
+        >
+          <Text style={screenStyles.backIcon}>←</Text>
+        </Pressable>
         <Text style={screenStyles.headerTitle}>My Downloads</Text>
       </View>
 
@@ -966,15 +999,29 @@ export default function DownloadsScreen() {
 }
 
 const screenStyles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: BG },
-  loadingBox: { flex: 1, backgroundColor: BG, alignItems: 'center', justifyContent: 'center' },
+  // 150 px top padding clears the camera punch-hole / tall status bar area
+  screen: { flex: 1, backgroundColor: BG, paddingTop: 150 },
+  loadingBox: { flex: 1, backgroundColor: BG, alignItems: 'center', justifyContent: 'center', paddingTop: 150 },
   header: {
-    paddingTop: 16,
-    paddingBottom: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingBottom: 14,
     paddingHorizontal: 16,
     backgroundColor: BG,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(255,255,255,0.06)',
   },
-  headerTitle: { color: TEXT, fontSize: 26, fontWeight: '800', letterSpacing: -0.5 },
+  backBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255,255,255,0.07)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  backIcon: { color: TEXT, fontSize: 18, lineHeight: 22 },
+  headerTitle: { color: TEXT, fontSize: 24, fontWeight: '800', letterSpacing: -0.4, flex: 1 },
   scroll: { flex: 1 },
   scrollContent: { paddingBottom: 40 },
   scrollEmpty: { flex: 1 },

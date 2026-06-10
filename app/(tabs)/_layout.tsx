@@ -1,102 +1,78 @@
 import { Tabs } from 'expo-router';
-import { Platform, StatusBar } from 'react-native';
+import { Platform, Pressable, StatusBar, StyleSheet, Text, View } from 'react-native';
+import type { BottomTabBarProps } from '@react-navigation/bottom-tabs';
 
-const STATUS_BAR_HEIGHT = Platform.OS === 'android' ? (StatusBar.currentHeight ?? 24) : 44;
+// Safe bottom inset — leaves breathing room above the home indicator on iOS.
+const BOTTOM_INSET = Platform.OS === 'ios' ? 28 : 12;
 
 export default function TabLayout() {
   return (
     <Tabs
-      tabBar={(props) => <TopTabBar {...props} />}
-      screenOptions={{
-        headerShown: false,
-      }}
+      tabBar={(props) => <MyDownloadsBar {...props} />}
+      screenOptions={{ headerShown: false }}
     >
-      <Tabs.Screen
-        name="explore"
-        options={{ title: 'Learn' }}
-      />
-      <Tabs.Screen
-        name="downloads"
-        options={{ title: 'Downloads' }}
-      />
-      <Tabs.Screen
-        name="index"
-        options={{ href: null }}
-      />
+      <Tabs.Screen name="explore"   options={{ title: 'Learn' }} />
+      <Tabs.Screen name="downloads" options={{ title: 'Downloads' }} />
+      <Tabs.Screen name="index"     options={{ href: null }} />
     </Tabs>
   );
 }
 
-import { Pressable, StyleSheet, Text, View } from 'react-native';
-import type { BottomTabBarProps } from '@react-navigation/bottom-tabs';
+// ─── Single full-width "My Downloads" button bar ─────────────────────────────
 
-function TopTabBar({ state, descriptors, navigation }: BottomTabBarProps) {
-  const visibleRoutes = state.routes.filter((r) => {
-    const opts = descriptors[r.key]?.options as any;
-    return opts?.href !== null;
-  });
+function MyDownloadsBar({ state, navigation }: BottomTabBarProps) {
+  const downloadsIdx = state.routes.findIndex((r) => r.name === 'downloads');
+  const isOnDownloads = state.index === downloadsIdx;
 
   return (
-    <View style={barStyles.bar}>
-      {visibleRoutes.map((route) => {
-        const isFocused = state.index === state.routes.indexOf(route);
-        const label =
-          (descriptors[route.key]?.options as any)?.title ?? route.name;
-
-        return (
-          <Pressable
-            key={route.key}
-            style={barStyles.tab}
-            onPress={() => {
-              if (!isFocused) navigation.navigate(route.name);
-            }}
-            android_ripple={{ color: 'rgba(79,195,247,0.15)', borderless: false }}
-          >
-            <Text style={[barStyles.icon, isFocused && barStyles.iconActive]}>
-              {route.name === 'explore' ? '📚' : '⬇'}
-            </Text>
-            <Text style={[barStyles.label, isFocused && barStyles.labelActive]}>
-              {label}
-            </Text>
-            {isFocused && <View style={barStyles.indicator} />}
-          </Pressable>
-        );
-      })}
+    <View style={barStyles.container}>
+      <Pressable
+        style={barStyles.button}
+        onPress={() => {
+          if (!isOnDownloads) navigation.navigate('downloads');
+        }}
+        android_ripple={{ color: 'rgba(15,25,35,0.1)' }}
+        accessibilityRole="button"
+        accessibilityLabel="My Downloads"
+      >
+        <Text style={barStyles.icon}>⬇</Text>
+        <Text style={barStyles.label}>My Downloads</Text>
+      </Pressable>
     </View>
   );
 }
 
 const barStyles = StyleSheet.create({
-  bar: {
-    flexDirection: 'row',
+  container: {
     backgroundColor: '#0F1923',
-    paddingTop: STATUS_BAR_HEIGHT,
-    borderBottomWidth: 1,
-    borderBottomColor: '#1C2B35',
-    elevation: 8,
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    paddingBottom: BOTTOM_INSET,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(255,255,255,0.10)',
+    // Elevation so it sits above the web content's own nav bar
+    elevation: 12,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
+    shadowOffset: { width: 0, height: -2 },
+    shadowOpacity: 0.35,
+    shadowRadius: 6,
   },
-  tab: {
-    flex: 1,
+  button: {
+    flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 10,
-    position: 'relative',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    paddingVertical: 14,
   },
-  icon: { fontSize: 18, marginBottom: 2, opacity: 0.45 },
-  iconActive: { opacity: 1 },
-  label: { fontSize: 11, fontWeight: '600', color: '#5A7080' },
-  labelActive: { color: '#4FC3F7' },
-  indicator: {
-    position: 'absolute',
-    bottom: 0,
-    left: '20%',
-    right: '20%',
-    height: 2,
-    backgroundColor: '#4FC3F7',
-    borderTopLeftRadius: 2,
-    borderTopRightRadius: 2,
+  icon: {
+    fontSize: 16,
+  },
+  label: {
+    color: '#0F1923',
+    fontSize: 16,
+    fontWeight: '700',
+    letterSpacing: 0.2,
   },
 });
