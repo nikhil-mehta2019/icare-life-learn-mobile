@@ -5,6 +5,7 @@ import {
   ActivityIndicator,
   Alert,
   Animated,
+  Image,
   Modal,
   Platform,
   Pressable,
@@ -18,6 +19,7 @@ import IcareOfflineDrm, {
   onDownloadProgress,
   type DownloadInfo,
 } from '../../modules/icare-offline-drm';
+import { fetchChapter } from '../../api/base44Client';
 import { getAllProgress, type ChapterProgress } from '../../store/offlineProgress';
 
 // ─── Constants ──────────────────────────────────────────────────────────────────
@@ -70,6 +72,11 @@ function licenseAge(downloadedAt: string | null | undefined): 'active' | 'expiri
   return 'active';
 }
 
+// Returns true if s looks like a raw MongoDB ObjectId (24 hex chars) — i.e. title was never set.
+function isRawId(s: string | null | undefined): boolean {
+  return !!s && /^[0-9a-f]{24}$/i.test(s);
+}
+
 // Extract a "course name" from the chapter title.
 // Titles look like "Course Name – Chapter N" or "Course Name: Chapter N".
 // If no separator, every chapter is its own group.
@@ -86,11 +93,17 @@ interface EnrichedDownload extends DownloadInfo {
 
 // ─── Thumbnail Placeholder ──────────────────────────────────────────────────────
 
-function Thumbnail({ size, isActive }: { size: number; isActive?: boolean }) {
+function Thumbnail({ size, isActive, url }: { size: number; isActive?: boolean; url?: string | null }) {
   return (
     <View style={[thumbStyles.box, { width: size, height: size * 0.5625 }]}>
-      <View style={thumbStyles.gradient} />
-      <Text style={thumbStyles.icon}>🎬</Text>
+      {url ? (
+        <Image source={{ uri: url }} style={StyleSheet.absoluteFill} resizeMode="cover" />
+      ) : (
+        <>
+          <View style={thumbStyles.gradient} />
+          <Text style={thumbStyles.icon}>🎬</Text>
+        </>
+      )}
       {isActive && (
         <View style={thumbStyles.playBadge}>
           <Text style={thumbStyles.playBadgeText}>▶</Text>
@@ -141,7 +154,7 @@ function ContinueWatchingCard({
 
   return (
     <Pressable style={cwStyles.card} onPress={onPress} android_ripple={{ color: 'rgba(255,255,255,0.08)' }}>
-      <Thumbnail size={160} isActive />
+      <Thumbnail size={160} isActive url={item.thumbnailUrl} />
       {/* Progress bar overlay at bottom */}
       <View style={cwStyles.progressTrack}>
         <View style={[cwStyles.progressFill, { width: `${pct}%` as any }]} />
@@ -205,7 +218,7 @@ function ActiveDownloadCard({
 
   return (
     <View style={activeStyles.card}>
-      <Thumbnail size={72} />
+      <Thumbnail size={72} url={item.thumbnailUrl} />
       <View style={activeStyles.content}>
         <Text style={activeStyles.title} numberOfLines={2}>{item.title ?? item.id}</Text>
         {isDownloading || item.state === 'queued' || item.state === 'stopped' ? (
@@ -295,7 +308,7 @@ function ContentCard({
       android_ripple={{ color: 'rgba(255,255,255,0.06)' }}
     >
       <View style={ccStyles.thumbWrap}>
-        <Thumbnail size={110} />
+        <Thumbnail size={110} url={item.thumbnailUrl} />
         {/* watch progress stripe */}
         {hasProgress && (
           <View style={ccStyles.progressTrack}>
@@ -565,6 +578,8 @@ export default function DownloadsScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [modalItem, setModalItem] = useState<EnrichedDownload | null>(null);
+  const [resolvedTitles, setResolvedTitles] = useState<Record<string, string>>({});
+  const resolvedTitlesRef = useRef<Record<string, string>>({});
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // pendingNavId: set before closing modal, consumed in onModalDismiss to
   // navigate AFTER the modal is fully gone (avoids NavigationContainer crash on Android).
@@ -659,6 +674,41 @@ export default function DownloadsScreen() {
     };
   }, [items.length]);
 
+  // ── Resolve missing/raw-ID titles from Base44 API ──
+
+  // Stable key: sorted IDs that still need a real title fetched.
+  // Changes only when the set of unresolved IDs changes — NOT on every poll tick.
+  const needsResolutionKey = useMemo(
+    () =>
+      items
+        .filter((d) => !resolvedTitlesRef.current[d.id] && (!d.title || isRawId(d.title)))
+        .map((d) => d.id)
+        .sort()
+        .join(','),
+    [items]
+  );
+
+  useEffect(() => {
+    if (!needsResolutionKey) return; // nothing to resolve
+    let cancelled = false;
+    (async () => {
+      const toResolve = needsResolutionKey.split(',').filter(Boolean);
+      const updates: Record<string, string> = {};
+      for (const id of toResolve) {
+        if (resolvedTitlesRef.current[id]) continue; // already resolved
+        try {
+          const { data } = await fetchChapter(id);
+          if (data?.title) updates[id] = data.title;
+        } catch { /* silently ignore — will show id as fallback */ }
+      }
+      if (!cancelled && Object.keys(updates).length > 0) {
+        resolvedTitlesRef.current = { ...resolvedTitlesRef.current, ...updates };
+        setResolvedTitles(resolvedTitlesRef.current);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [needsResolutionKey]);
+
   // ── Actions ──
 
   const navigateToPlayer = useCallback((id: string) => {
@@ -724,10 +774,12 @@ export default function DownloadsScreen() {
     () =>
       items.map((d) => ({
         ...d,
+        // Prefer API-resolved title > stored title (only if it's not a raw ObjectId) > null
+        title: resolvedTitles[d.id] ?? (isRawId(d.title) ? null : d.title) ?? null,
         progress: progressMap[d.id] ?? null,
         licStatus: licenseAge(d.downloadedAt),
       })),
-    [items, progressMap]
+    [items, progressMap, resolvedTitles]
   );
 
   // ── Build sections ──
