@@ -3,6 +3,7 @@ package expo.modules.icareofflinedrm
 import android.net.Uri
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.offline.Download
@@ -137,20 +138,25 @@ class IcareOfflineDrmModule : Module() {
                     h.replaceTrackSelections(periodIndex, defaultParams)
                     // Text/subtitle tracks are excluded by the default selector.
                     // Explicitly add every text track group so captions are downloaded.
-                    val tracks = h.getTrackGroups(periodIndex)
-                    for (group in tracks.groups) {
-                      if (group.type == C.TRACK_TYPE_TEXT && group.length > 0) {
-                        h.addTrackSelection(
-                          periodIndex,
-                          defaultParams.buildUpon()
-                            .addOverride(
-                              TrackSelectionOverride(
-                                group.mediaTrackGroup,
-                                (0 until group.length).toList(),
+                    // getTrackGroups returns TrackGroupArray in Media3 1.8.0.
+                    val trackGroupArray = h.getTrackGroups(periodIndex)
+                    for (i in 0 until trackGroupArray.length) {
+                      val group = trackGroupArray.get(i)
+                      if (group.length > 0) {
+                        val mimeType = group.getFormat(0).sampleMimeType ?: ""
+                        if (MimeTypes.isText(mimeType)) {
+                          h.addTrackSelection(
+                            periodIndex,
+                            defaultParams.buildUpon()
+                              .addOverride(
+                                TrackSelectionOverride(
+                                  group,
+                                  (0 until group.length).toList(),
+                                )
                               )
-                            )
-                            .build()
-                        )
+                              .build()
+                          )
+                        }
                       }
                     }
                   }
