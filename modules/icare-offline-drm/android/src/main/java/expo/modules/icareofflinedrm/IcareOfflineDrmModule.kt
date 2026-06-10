@@ -124,7 +124,7 @@ class IcareOfflineDrmModule : Module() {
             val helper = DownloadUtil.getDownloadHelperForMediaItem(ctx, mediaItemForHelper)
             helperRef.set(helper)
             helper.prepare(object : androidx.media3.exoplayer.offline.DownloadHelper.Callback {
-              override fun onPrepared(h: androidx.media3.exoplayer.offline.DownloadHelper, isEmpty: Boolean) {
+              override fun onPrepared(h: androidx.media3.exoplayer.offline.DownloadHelper) {
                 try { downloadRequestRef.set(h.getDownloadRequest(params.id, null)) }
                 catch (e: Throwable) { prepErr.set(e) }
                 latch.countDown()
