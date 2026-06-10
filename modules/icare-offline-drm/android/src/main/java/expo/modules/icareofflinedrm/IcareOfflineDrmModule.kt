@@ -128,38 +128,70 @@ class IcareOfflineDrmModule : Module() {
             helper.prepare(object : androidx.media3.exoplayer.offline.DownloadHelper.Callback {
               override fun onPrepared(h: androidx.media3.exoplayer.offline.DownloadHelper, isEmpty: Boolean) {
                 try {
-                  // Use optimal track selection (one best rendition per audio/video group)
-                  // rather than letting the helper pick all renditions, which causes
-                  // duplicates in the offline player's track selector UI.
                   val defaultParams = androidx.media3.exoplayer.offline.DownloadHelper
                     .getDefaultTrackSelectorParameters(ctx)
+
                   for (periodIndex in 0 until h.periodCount) {
                     h.clearTrackSelections(periodIndex)
-                    h.replaceTrackSelections(periodIndex, defaultParams)
-                    // Text/subtitle tracks are excluded by the default selector.
-                    // Explicitly add every text track group so captions are downloaded.
-                    // getTrackGroups returns TrackGroupArray in Media3 1.8.0.
-                    val trackGroupArray = h.getTrackGroups(periodIndex)
-                    for (i in 0 until trackGroupArray.length) {
-                      val group = trackGroupArray.get(i)
-                      if (group.length > 0) {
-                        val mimeType = group.getFormat(0).sampleMimeType ?: ""
-                        if (MimeTypes.isText(mimeType)) {
-                          h.addTrackSelection(
-                            periodIndex,
-                            defaultParams.buildUpon()
-                              .addOverride(
-                                TrackSelectionOverride(
-                                  group,
-                                  (0 until group.length).toList(),
-                                )
-                              )
-                              .build()
-                          )
-                        }
-                      }
+                    val tga = h.getTrackGroups(periodIndex) // returns TrackGroupArray in Media3 1.8.0
+
+                    // ── Identify best audio group per language ───────────────────
+                    // When an HLS manifest declares multiple audio groups with the
+                    // same language/name (e.g. "Default" × 3 at different bitrates),
+                    // we want to download only ONE per language to avoid duplicate
+                    // tracks in the offline player UI.
+                    // Highest bitrate wins; undeclared bitrate → Int.MAX_VALUE so
+                    // the last-seen entry prevails (typical for HLS group ordering).
+                    val bestAudioPerLang = mutableMapOf<String, Pair<Int, Int>>()
+                    for (i in 0 until tga.length) {
+                      val g   = tga.get(i)
+                      if (g.length == 0) continue
+                      val fmt = g.getFormat(0)
+                      if (!MimeTypes.isAudio(fmt.sampleMimeType ?: "")) continue
+                      val lang = fmt.language ?: "und"
+                      val bits = if (fmt.bitrate > 0) fmt.bitrate else Int.MAX_VALUE
+                      val cur  = bestAudioPerLang[lang]
+                      if (cur == null || bits >= cur.second) bestAudioPerLang[lang] = Pair(i, bits)
+                    }
+
+                    // 1. Video — let defaultParams pick the adaptive quality set
+                    h.addTrackSelection(
+                      periodIndex,
+                      defaultParams.buildUpon()
+                        .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
+                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT,  true)
+                        .build()
+                    )
+
+                    // 2. Audio — ONE group per language only
+                    for ((_, pair) in bestAudioPerLang) {
+                      val g = tga.get(pair.first)
+                      h.addTrackSelection(
+                        periodIndex,
+                        defaultParams.buildUpon()
+                          .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, true)
+                          .setTrackTypeDisabled(C.TRACK_TYPE_TEXT,  true)
+                          .addOverride(TrackSelectionOverride(g, (0 until g.length).toList()))
+                          .build()
+                      )
+                    }
+
+                    // 3. Text/subtitle — include every declared group (all languages)
+                    for (i in 0 until tga.length) {
+                      val g = tga.get(i)
+                      if (g.length == 0) continue
+                      if (!MimeTypes.isText(g.getFormat(0).sampleMimeType ?: "")) continue
+                      h.addTrackSelection(
+                        periodIndex,
+                        defaultParams.buildUpon()
+                          .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, true)
+                          .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
+                          .addOverride(TrackSelectionOverride(g, (0 until g.length).toList()))
+                          .build()
+                      )
                     }
                   }
+
                   downloadRequestRef.set(h.getDownloadRequest(params.id, null))
                 }
                 catch (e: Throwable) { prepErr.set(e) }

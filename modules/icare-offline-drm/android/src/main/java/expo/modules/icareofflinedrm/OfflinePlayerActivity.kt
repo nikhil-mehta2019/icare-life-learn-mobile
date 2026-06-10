@@ -14,6 +14,8 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.exoplayer.ExoPlayer
@@ -223,6 +225,28 @@ class OfflinePlayerActivity : Activity() {
                         else -> state.toString()
                     }
                 }")
+            }
+            override fun onTracksChanged(tracks: Tracks) {
+                // Deduplicate audio groups: HLS manifests often declare multiple
+                // audio GROUP-IDs all sharing the same display name (e.g. three
+                // copies of "Default (no VO)" at different bitrates).  Disable all
+                // but the first occurrence per name so the track-selector UI shows
+                // only one entry per language.
+                val seenNames = mutableSetOf<String>()
+                val toDisable = mutableListOf<TrackSelectionOverride>()
+                for (group in tracks.groups) {
+                    if (group.type != C.TRACK_TYPE_AUDIO) continue
+                    val fmt  = group.getTrackFormat(0)
+                    val name = fmt.label ?: fmt.language ?: "und"
+                    if (!seenNames.add(name)) {
+                        toDisable.add(TrackSelectionOverride(group.mediaTrackGroup, emptyList()))
+                    }
+                }
+                if (toDisable.isNotEmpty()) {
+                    val p = player?.trackSelectionParameters?.buildUpon() ?: return
+                    toDisable.forEach { p.addOverride(it) }
+                    player?.trackSelectionParameters = p.build()
+                }
             }
         })
 
