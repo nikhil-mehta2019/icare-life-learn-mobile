@@ -19,7 +19,7 @@ import IcareOfflineDrm, {
   onDownloadProgress,
   type DownloadInfo,
 } from '../../modules/icare-offline-drm';
-import { fetchChapter } from '../../api/base44Client';
+import { fetchChapter, fetchCourse, fetchModule } from '../../api/base44Client';
 import { getAllProgress, type ChapterProgress } from '../../store/offlineProgress';
 
 // ─── Constants ──────────────────────────────────────────────────────────────────
@@ -89,6 +89,8 @@ function courseKey(title: string | null | undefined): string {
 interface EnrichedDownload extends DownloadInfo {
   progress: ChapterProgress | null;
   licStatus: 'active' | 'expiring' | 'expired';
+  courseName: string | null;
+  moduleName: string | null;
 }
 
 // ─── Thumbnail Placeholder ──────────────────────────────────────────────────────
@@ -402,6 +404,38 @@ const shStyles = StyleSheet.create({
   count: { color: TEXT_MUTED, fontSize: 12 },
 });
 
+// ─── Module Sub-Header ──────────────────────────────────────────────────────────
+
+function ModuleHeader({ title, count }: { title: string; count: number }) {
+  return (
+    <View style={mhStyles.row}>
+      <View style={mhStyles.accent} />
+      <Text style={mhStyles.title} numberOfLines={1}>{title}</Text>
+      <Text style={mhStyles.count}>{count} {count === 1 ? 'video' : 'videos'}</Text>
+    </View>
+  );
+}
+
+const mhStyles = StyleSheet.create({
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingLeft: 20,
+    paddingRight: 16,
+    paddingTop: 10,
+    paddingBottom: 4,
+    gap: 8,
+  },
+  accent: {
+    width: 3,
+    height: 14,
+    borderRadius: 2,
+    backgroundColor: ACCENT,
+  },
+  title: { color: TEXT_MUTED, fontSize: 12, fontWeight: '600', flex: 1, letterSpacing: 0.2 },
+  count: { color: TEXT_MUTED, fontSize: 11 },
+});
+
 // ─── Empty State ────────────────────────────────────────────────────────────────
 
 function EmptyState() {
@@ -590,7 +624,7 @@ type Section =
   | { type: 'storage'; usedBytes: number; freeBytes: number; count: number }
   | { type: 'continue'; items: EnrichedDownload[] }
   | { type: 'active'; items: EnrichedDownload[] }
-  | { type: 'course'; course: string; items: EnrichedDownload[] }
+  | { type: 'course'; courseName: string; modules: { moduleName: string; items: EnrichedDownload[] }[] }
   | { type: 'empty' };
 
 export default function DownloadsScreen() {
@@ -604,6 +638,8 @@ export default function DownloadsScreen() {
   const [modalItem, setModalItem] = useState<EnrichedDownload | null>(null);
   const [resolvedTitles, setResolvedTitles] = useState<Record<string, string>>({});
   const resolvedTitlesRef = useRef<Record<string, string>>({});
+  const [resolvedHierarchy, setResolvedHierarchy] = useState<Record<string, { courseName: string; moduleName: string }>>({});
+  const resolvedHierarchyRef = useRef<Record<string, { courseName: string; moduleName: string }>>({});
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // pendingNavId: set before closing modal, consumed in onModalDismiss to
   // navigate AFTER the modal is fully gone (avoids NavigationContainer crash on Android).
@@ -733,6 +769,66 @@ export default function DownloadsScreen() {
     return () => { cancelled = true; };
   }, [needsResolutionKey]);
 
+  // ── Resolve Course → Module hierarchy for each completed download ──
+
+  // Only completed downloads need hierarchy; active/queued don't show in grouped view.
+  const needsHierarchyKey = useMemo(
+    () =>
+      items
+        .filter((d) => d.state === 'completed' && !resolvedHierarchyRef.current[d.id])
+        .map((d) => d.id)
+        .sort()
+        .join(','),
+    [items]
+  );
+
+  useEffect(() => {
+    if (!needsHierarchyKey) return;
+    let cancelled = false;
+    (async () => {
+      const toResolve = needsHierarchyKey.split(',').filter(Boolean);
+      // Deduplicate course/module fetches within this batch
+      const courseNameCache: Record<string, string> = {};
+      const moduleNameCache: Record<string, string> = {};
+      const updates: Record<string, { courseName: string; moduleName: string }> = {};
+
+      for (const id of toResolve) {
+        if (resolvedHierarchyRef.current[id]) continue;
+        try {
+          const { data: ch } = await fetchChapter(id);
+          const cid = ch?.courseId;
+          const mid = ch?.moduleId;
+          if (!cid || !mid) continue;
+
+          if (!(cid in courseNameCache)) {
+            try {
+              const { data: course } = await fetchCourse(cid);
+              courseNameCache[cid] = course?.title ?? '';
+            } catch { courseNameCache[cid] = ''; }
+          }
+
+          if (!(mid in moduleNameCache)) {
+            try {
+              const { data: mod } = await fetchModule(mid);
+              moduleNameCache[mid] = mod?.title ?? '';
+            } catch { moduleNameCache[mid] = ''; }
+          }
+
+          updates[id] = {
+            courseName: courseNameCache[cid] || '',
+            moduleName: moduleNameCache[mid] || '',
+          };
+        } catch { /* silently ignore — fallback to title-derived grouping */ }
+      }
+
+      if (!cancelled && Object.keys(updates).length > 0) {
+        resolvedHierarchyRef.current = { ...resolvedHierarchyRef.current, ...updates };
+        setResolvedHierarchy({ ...resolvedHierarchyRef.current });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [needsHierarchyKey]);
+
   // ── Actions ──
 
   const navigateToPlayer = useCallback((id: string) => {
@@ -802,8 +898,10 @@ export default function DownloadsScreen() {
         title: resolvedTitles[d.id] ?? (isRawId(d.title) ? null : d.title) ?? null,
         progress: progressMap[d.id] ?? null,
         licStatus: licenseAge(d.downloadedAt),
+        courseName: resolvedHierarchy[d.id]?.courseName ?? null,
+        moduleName: resolvedHierarchy[d.id]?.moduleName ?? null,
       })),
-    [items, progressMap, resolvedTitles]
+    [items, progressMap, resolvedTitles, resolvedHierarchy]
   );
 
   // ── Build sections ──
@@ -837,17 +935,26 @@ export default function DownloadsScreen() {
       result.push({ type: 'active', items: active });
     }
 
-    // Completed grouped by course
-    const courseMap = new Map<string, EnrichedDownload[]>();
+    // Completed — grouped by Course → Module.
+    // Falls back to title-derived course key while hierarchy is still loading.
+    const courseMap = new Map<string, { courseName: string; moduleMap: Map<string, EnrichedDownload[]> }>();
     for (const d of completed) {
-      const key = courseKey(d.title);
-      const arr = courseMap.get(key) ?? [];
+      const cName = (d.courseName && d.courseName.length > 0) ? d.courseName : courseKey(d.title);
+      const mName = d.moduleName ?? '';
+      if (!courseMap.has(cName)) {
+        courseMap.set(cName, { courseName: cName, moduleMap: new Map() });
+      }
+      const cEntry = courseMap.get(cName)!;
+      const arr = cEntry.moduleMap.get(mName) ?? [];
       arr.push(d);
-      courseMap.set(key, arr);
+      cEntry.moduleMap.set(mName, arr);
     }
-
-    for (const [course, courseItems] of courseMap.entries()) {
-      result.push({ type: 'course', course, items: courseItems });
+    for (const [, cEntry] of courseMap.entries()) {
+      const modules = Array.from(cEntry.moduleMap.entries()).map(([mName, mItems]) => ({
+        moduleName: mName,
+        items: mItems,
+      }));
+      result.push({ type: 'course', courseName: cEntry.courseName, modules });
     }
 
     return result;
@@ -905,30 +1012,38 @@ export default function DownloadsScreen() {
 
       case 'course': {
         const displayName =
-          section.course === '__ungrouped__' ? 'Downloaded Videos' : section.course;
+          section.courseName === '__ungrouped__' ? 'Downloaded Videos' : section.courseName;
+        const totalCount = section.modules.reduce((sum, m) => sum + m.items.length, 0);
         return (
-          <View key={`course-${section.course}`}>
-            <SectionHeader title={displayName} count={section.items.length} />
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 12 }}
-            >
-              {section.items.map((item) => (
-                <ContentCard
-                  key={item.id}
-                  item={item}
-                  onPress={() => {
-                    if (item.licStatus === 'expired') {
-                      setModalItem(item);
-                    } else {
-                      playChapter(item.id);
-                    }
-                  }}
-                  onMorePress={() => setModalItem(item)}
-                />
-              ))}
-            </ScrollView>
+          <View key={`course-${section.courseName}`}>
+            <SectionHeader title={displayName} count={totalCount} />
+            {section.modules.map((mod) => (
+              <View key={`mod-${mod.moduleName || '_default'}`}>
+                {mod.moduleName ? (
+                  <ModuleHeader title={mod.moduleName} count={mod.items.length} />
+                ) : null}
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 12 }}
+                >
+                  {mod.items.map((item) => (
+                    <ContentCard
+                      key={item.id}
+                      item={item}
+                      onPress={() => {
+                        if (item.licStatus === 'expired') {
+                          setModalItem(item);
+                        } else {
+                          playChapter(item.id);
+                        }
+                      }}
+                      onMorePress={() => setModalItem(item)}
+                    />
+                  ))}
+                </ScrollView>
+              </View>
+            ))}
           </View>
         );
       }
@@ -999,9 +1114,9 @@ export default function DownloadsScreen() {
 }
 
 const screenStyles = StyleSheet.create({
-  // 150 px top padding clears the camera punch-hole / tall status bar area
-  screen: { flex: 1, backgroundColor: BG, paddingTop: 150 },
-  loadingBox: { flex: 1, backgroundColor: BG, alignItems: 'center', justifyContent: 'center', paddingTop: 150 },
+  // 80 px top padding clears the camera punch-hole / tall status bar area
+  screen: { flex: 1, backgroundColor: BG, paddingTop: 80 },
+  loadingBox: { flex: 1, backgroundColor: BG, alignItems: 'center', justifyContent: 'center', paddingTop: 80 },
   header: {
     flexDirection: 'row',
     alignItems: 'center',

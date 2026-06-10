@@ -174,6 +174,12 @@ export async function fetchModules(courseId: string): Promise<Module[]> {
   return Array.isArray(data) ? data : [];
 }
 
+export async function fetchModule(
+  moduleId: string
+): Promise<{ status: number; data: Module }> {
+  return apiGet<Module>(`/entities/Module/${moduleId}`);
+}
+
 // ─── Chapter ───────────────────────────────────────────────────────────────────
 
 export async function fetchChapters(moduleId: string): Promise<Chapter[]> {
