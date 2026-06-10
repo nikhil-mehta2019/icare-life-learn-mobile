@@ -436,9 +436,49 @@ const INJECTED_JS = `
   var _dlBtn = null;
   var _dlChapterId = null;
   var _dlInProgress = false;
+  var _dlState = null;
+
+  // Called by the native side (via injectJavaScript) to reflect the chapter's
+  // actual download state in the floating button without any user interaction.
+  window.__icare_updateDlBtnState = function(chapterId, state, pct) {
+    if (!_dlBtn || _dlBtn.dataset.cid !== chapterId) return;
+    _dlState = state;
+    if (state === 'completed') {
+      _dlBtn.textContent = '✓ Downloaded';
+      _dlBtn.style.background = '#2e7d32';
+      _dlBtn.style.opacity = '1';
+      _dlInProgress = false;
+    } else if (state === 'downloading' || state === 'queued') {
+      var p = (typeof pct === 'number' && pct >= 0) ? Math.round(pct) + '%' : '…';
+      _dlBtn.textContent = '⏳ ' + p;
+      _dlBtn.style.background = '#1D3D47';
+      _dlBtn.style.opacity = '0.85';
+    } else if (state === 'failed') {
+      _dlBtn.textContent = '↺ Retry';
+      _dlBtn.style.background = '#b71c1c';
+      _dlBtn.style.opacity = '1';
+      _dlInProgress = false;
+    } else {
+      _dlBtn.textContent = '⬇ Download';
+      _dlBtn.style.background = '#1D3D47';
+      _dlBtn.style.opacity = '1';
+      _dlInProgress = false;
+    }
+  };
 
   function _showDownloadBtn(chapterId) {
-    if (_dlBtn) { _dlBtn.dataset.cid = chapterId; _dlChapterId = chapterId; return; }
+    if (_dlBtn) {
+      // Navigated to a different chapter — reset the button and re-check state.
+      _dlBtn.dataset.cid = chapterId;
+      _dlChapterId = chapterId;
+      _dlState = null;
+      _dlInProgress = false;
+      _dlBtn.textContent = '⬇ Download';
+      _dlBtn.style.background = '#1D3D47';
+      _dlBtn.style.opacity = '1';
+      _postMessage({ type: 'CHECK_DOWNLOAD_STATUS', chapterId: chapterId });
+      return;
+    }
     var btn = document.createElement('button');
     btn.id = '__icare_dl_btn';
     btn.dataset.cid = chapterId;
@@ -464,6 +504,11 @@ const INJECTED_JS = `
       'letter-spacing:0.2px',
     ].join(';');
     btn.addEventListener('click', function() {
+      // Chapter already downloaded or queued — open Downloads tab instead.
+      if (_dlState === 'completed' || _dlState === 'downloading' || _dlState === 'queued') {
+        _postMessage({ type: 'GO_TO_DOWNLOADS' });
+        return;
+      }
       if (_dlInProgress) return;
       var cid = btn.dataset.cid;
       if (!cid) return;
@@ -475,17 +520,21 @@ const INJECTED_JS = `
     document.body.appendChild(btn);
     _dlBtn = btn;
     _dlChapterId = chapterId;
+    // Ask native side for current download state so the button is correct immediately.
+    _postMessage({ type: 'CHECK_DOWNLOAD_STATUS', chapterId: chapterId });
   }
 
   function _hideDownloadBtn() {
     if (_dlBtn) { _dlBtn.remove(); _dlBtn = null; }
     _dlChapterId = null;
     _dlInProgress = false;
+    _dlState = null;
   }
 
   function _resetDownloadBtn() {
     _dlInProgress = false;
-    if (_dlBtn) { _dlBtn.textContent = '⬇ Download'; _dlBtn.style.opacity = '1'; }
+    _dlState = null;
+    if (_dlBtn) { _dlBtn.textContent = '⬇ Download'; _dlBtn.style.background = '#1D3D47'; _dlBtn.style.opacity = '1'; }
   }
 
   // Separate fetch path for download — posts DOWNLOAD_CHAPTER (not OPEN_CHAPTER).
@@ -817,6 +866,25 @@ export default function ExploreScreen() {
           if (!chapterId) break;
           console.warn(`[explore] DOWNLOAD_ERROR for chapter ${chapterId}: ${msg.error}`);
           Alert.alert('Download failed', String(msg.error ?? 'Could not fetch tokens for download'));
+          break;
+
+        case 'CHECK_DOWNLOAD_STATUS':
+          // WebView is asking whether this chapter is already downloaded.
+          // Respond by injecting __icare_updateDlBtnState() so the floating
+          // button immediately reflects the real state (Downloaded / Downloading / etc.)
+          if (!chapterId) break;
+          IcareOfflineDrm.getDownload(chapterId).then((dl: any) => {
+            const dlState = dl?.state ?? null;
+            const dlPct   = typeof dl?.percentDownloaded === 'number' ? dl.percentDownloaded : -1;
+            webRef.current?.injectJavaScript(
+              `window.__icare_updateDlBtnState(${JSON.stringify(chapterId)},${JSON.stringify(dlState)},${dlPct}); true;`
+            );
+          }).catch(() => {});
+          break;
+
+        case 'GO_TO_DOWNLOADS':
+          // User tapped the floating button while chapter was already downloaded.
+          router.push('/(tabs)/downloads' as any);
           break;
 
         case 'AUTH_JWT':
