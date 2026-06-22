@@ -7,9 +7,9 @@
     "icon": "./assets/images/android-icon-foreground.png",
     "scheme": "icarelifelearnmobile",
     "userInterfaceStyle": "automatic",
-    "ios": {
+    "ios": {h
       "supportsTablet": true,
-      "bundleIdentifier": "com.maveristic.icarelifelearnmobile",
+      "bundleIdentifier": "life.icare.app,
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
       }
@@ -61,7 +61,7 @@
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "isTablet": true,
-      "package": "com.maveristic.icarelifelearnmobile",
+      "package": "life.icare.app"
       "permissions": [
         "android.permission.INTERNET",
         "android.permission.ACCESS_NETWORK_STATE",
