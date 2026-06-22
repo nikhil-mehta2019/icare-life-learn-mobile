@@ -1,4 +1,4 @@
-package com.maveristic.icarelifelearnmobile
+package life.icare.app
 
 import android.app.Application
 import android.content.res.Configuration
