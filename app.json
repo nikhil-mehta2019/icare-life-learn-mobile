@@ -9,7 +9,7 @@
     "userInterfaceStyle": "automatic",
     "ios": {h
       "supportsTablet": true,
-      "bundleIdentifier": "life.icare.app,
+      "bundleIdentifier": "life.icare.app",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
       }
