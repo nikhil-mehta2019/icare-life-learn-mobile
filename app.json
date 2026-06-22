@@ -7,7 +7,7 @@
     "icon": "./assets/images/android-icon-foreground.png",
     "scheme": "icarelifelearnmobile",
     "userInterfaceStyle": "automatic",
-    "ios": {h
+    "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "life.icare.app",
       "infoPlist": {
