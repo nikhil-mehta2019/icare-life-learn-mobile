@@ -61,7 +61,7 @@
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "isTablet": true,
-      "package": "life.icare.app"
+      "package": "life.icare.app",
       "permissions": [
         "android.permission.INTERNET",
         "android.permission.ACCESS_NETWORK_STATE",
