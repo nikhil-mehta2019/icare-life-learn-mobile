@@ -2,7 +2,7 @@
   "expo": {
     "name": "icare-life-learn-mobile",
     "slug": "icare-life-learn-mobile",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "orientation": "portrait",
     "icon": "./assets/images/android-icon-foreground.png",
     "scheme": "icarelifelearnmobile",
