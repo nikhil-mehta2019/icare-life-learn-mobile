@@ -357,7 +357,14 @@ const INJECTED_JS = `
             ? chapter.muxSignedPlaybackId
           : (chapter.muxPlaybackId || null);
 
-        if (!playbackId) throw new Error('Chapter has no Mux playback ID');
+        if (!playbackId) {
+          // Not a video chapter — hide the download button if showing.
+          _muxChapterIds[chapterId] = false;
+          _hideDownloadBtn();
+          throw new Error('Chapter has no Mux playback ID');
+        }
+        _muxChapterIds[chapterId] = true;
+        _showDownloadBtn(chapterId);
 
         // Build the best direct-call headers we can assemble.
         var muxHdrs = Object.assign({}, hdrs);
@@ -437,6 +444,9 @@ const INJECTED_JS = `
   var _dlChapterId = null;
   var _dlInProgress = false;
   var _dlState = null;
+  // Chapters confirmed to have a Mux playback ID (video chapters only).
+  // Populated when _doFetchTokens resolves the chapter entity.
+  var _muxChapterIds = {};
 
   // Called by the native side (via injectJavaScript) to reflect the chapter's
   // actual download state in the floating button without any user interaction.
@@ -559,37 +569,36 @@ const INJECTED_JS = `
           : (chapter.muxSignedPlaybackRequired && chapter.muxSignedPlaybackId)
             ? chapter.muxSignedPlaybackId
           : (chapter.muxPlaybackId || null);
-        if (!playbackId) throw new Error('Chapter has no Mux playback ID');
-
-        var muxHdrs = Object.assign({}, hdrs);
-        if (_capturedAuthHeaders._ready) {
-          Object.keys(_capturedAuthHeaders).forEach(function(k) {
-            if (k !== '_ready') muxHdrs[k] = _capturedAuthHeaders[k];
-          });
-        } else {
-          var jwt = _getLocalStorageJwt();
-          if (jwt) { muxHdrs['Authorization'] = 'Bearer ' + jwt; }
+        if (!playbackId) {
+          _muxChapterIds[chapterId] = false;
+          _hideDownloadBtn();
+          return; // Not a video chapter — silently ignore download attempt.
         }
 
-        return fetchJsonWithTimeout('getMuxDownloadToken', api + '/functions/getMuxDownloadToken', {
-          method: 'POST',
-          headers: muxHdrs,
-          credentials: 'include',
-          body: JSON.stringify({ playbackId: playbackId }),
-        }, FETCH_TIMEOUT_MS).then(function(r) {
-          if (!r.ok) return r.json().catch(function(){return{};}).then(function(eb){
-            throw new Error(eb.error || ('getMuxDownloadToken failed (' + r.status + ')'));
-          });
-          return r.json();
-        }).then(function(dlTokens) {
-          log('info', '[OFFLINE-DRM] playbackId=' + playbackId
-            + ' drmEnabled=' + dlTokens.drmEnabled
-            + ' manifestUrl=' + (dlTokens.manifestUrl || 'null')
-            + ' widevineLicenseUrl=' + (dlTokens.widevineLicenseUrl || 'null'));
-          _postMessage({ type: 'DOWNLOAD_CHAPTER', chapterId: chapterId,
-                         chapter: chapter, dlTokens: dlTokens });
-          if (btn) { btn.textContent = '✓ Queued'; btn.style.background = '#2e7d32'; }
-          setTimeout(function() { _resetDownloadBtn(); }, 3000);
+        // Delegate token fetch to native side (HTTP not allowed from WebView).
+        var reqId = 'dl_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+        var capturedChapter = chapter;
+        return new Promise(function(resolve, reject) {
+          var timer = setTimeout(function() {
+            delete window.__icare_downloadTokenReady[reqId];
+            reject(new Error('Download token fetch timed out'));
+          }, FETCH_TIMEOUT_MS);
+          if (!window.__icare_downloadTokenReady) window.__icare_downloadTokenReady = {};
+          window.__icare_downloadTokenReady[reqId] = function(err, dlTokens) {
+            clearTimeout(timer);
+            delete window.__icare_downloadTokenReady[reqId];
+            if (err) { reject(new Error(err)); return; }
+            log('info', '[OFFLINE-DRM] playbackId=' + playbackId
+              + ' drmEnabled=' + dlTokens.drmEnabled
+              + ' manifestUrl=' + (dlTokens.manifestUrl || 'null')
+              + ' widevineLicenseUrl=' + (dlTokens.widevineLicenseUrl || 'null'));
+            _postMessage({ type: 'DOWNLOAD_CHAPTER', chapterId: chapterId,
+                           chapter: capturedChapter, dlTokens: dlTokens });
+            if (btn) { btn.textContent = '✓ Queued'; btn.style.background = '#2e7d32'; }
+            setTimeout(function() { _resetDownloadBtn(); }, 3000);
+            resolve(undefined);
+          };
+          _postMessage({ type: 'GET_DOWNLOAD_TOKEN', playbackId: playbackId, reqId: reqId });
         });
       })
       .catch(function(err) {
@@ -621,7 +630,15 @@ const INJECTED_JS = `
       return;
     }
 
-    _showDownloadBtn(chapterId);
+    // Show download button only for video (Mux) chapters.
+    // If we've already resolved this chapter, use the cached result immediately.
+    // If not yet resolved, _doFetchTokens will show/hide after the fetch.
+    if (_muxChapterIds[chapterId] === true) {
+      _showDownloadBtn(chapterId);
+    } else if (_muxChapterIds[chapterId] === false) {
+      _hideDownloadBtn();
+    }
+    // else: unknown — wait for _doFetchTokens to resolve before showing button.
 
     if (chapterId === _lastFiredId) {
       // Same chapter URL — already handled this navigation.
@@ -867,6 +884,35 @@ export default function ExploreScreen() {
           console.warn(`[explore] DOWNLOAD_ERROR for chapter ${chapterId}: ${msg.error}`);
           Alert.alert('Download failed', String(msg.error ?? 'Could not fetch tokens for download'));
           break;
+
+        case 'GET_DOWNLOAD_TOKEN': {
+          // WebView JS can't hit HTTP endpoints — delegate to native fetch.
+          const playbackId = msg.playbackId as string;
+          const reqId = msg.reqId as string;
+          if (!playbackId || !reqId) break;
+          fetch(
+            `http://35.154.164.178:8000/videos/by-mux-id/${encodeURIComponent(playbackId)}/download`,
+            { headers: { 'X-API-Key': 'sk_icare_1b75de18308eb135e2df9ef29aef825266eea22041f8e4a9' } }
+          ).then(async (r) => {
+            const data = await r.json();
+            if (!r.ok) throw new Error(data?.detail ?? `Download token fetch failed (${r.status})`);
+            const offline = data.offline ?? {};
+            const dlTokens = {
+              drmEnabled: !!data.drm_enabled,
+              manifestUrl: offline.manifest_url ?? data.download_url ?? '',
+              drmToken: offline.drm_token ?? '',
+              widevineLicenseUrl: offline.widevine_license_url ?? '',
+            };
+            webRef.current?.injectJavaScript(
+              `(window.__icare_downloadTokenReady||{})[${JSON.stringify(reqId)}]&&window.__icare_downloadTokenReady[${JSON.stringify(reqId)}](null,${JSON.stringify(dlTokens)}); true;`
+            );
+          }).catch((err: any) => {
+            webRef.current?.injectJavaScript(
+              `(window.__icare_downloadTokenReady||{})[${JSON.stringify(reqId)}]&&window.__icare_downloadTokenReady[${JSON.stringify(reqId)}](${JSON.stringify(String(err))},null); true;`
+            );
+          });
+          break;
+        }
 
         case 'CHECK_DOWNLOAD_STATUS':
           // WebView is asking whether this chapter is already downloaded.

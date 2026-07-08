@@ -317,16 +317,18 @@ function VideoPlayer({
         <Text style={styles.badge}>{mode === 'offline' ? 'Offline' : 'Streaming'}</Text>
       </View>
 
-      <DownloadControls
-        download={download}
-        offline={!!offline}
-        offlineDownload={download}
-        isDownloadPending={isDownloadPending}
-        onDownload={onDownload}
-        onDelete={onDelete}
-        onGoToDownloads={onGoToDownloads}
-        onRenewLicense={onRenewLicense}
-      />
+      {selectMuxPlaybackId(chapter ?? {} as Chapter) || download ? (
+        <DownloadControls
+          download={download}
+          offline={!!offline}
+          offlineDownload={download}
+          isDownloadPending={isDownloadPending}
+          onDownload={onDownload}
+          onDelete={onDelete}
+          onGoToDownloads={onGoToDownloads}
+          onRenewLicense={onRenewLicense}
+        />
+      ) : null}
     </GestureHandlerRootView>
   );
 }
@@ -703,16 +705,18 @@ export default function ChapterPlayerScreen() {
         <Text style={[styles.muted, { marginBottom: 32, textAlign: 'center' }]}>
           Watch this chapter in the Learn tab. You can download it here for offline viewing.
         </Text>
-        <DownloadControls
-          download={download}
-          offline={false}
-          offlineDownload={download}
-          isDownloadPending={isDownloadPending}
-          onDownload={handleDownload}
-          onDelete={handleDeleteDownload}
-          onGoToDownloads={handleGoToDownloads}
-          onRenewLicense={handleRenewLicense}
-        />
+        {selectMuxPlaybackId(chapter ?? {} as Chapter) || download ? (
+          <DownloadControls
+            download={download}
+            offline={false}
+            offlineDownload={download}
+            isDownloadPending={isDownloadPending}
+            onDownload={handleDownload}
+            onDelete={handleDeleteDownload}
+            onGoToDownloads={handleGoToDownloads}
+            onRenewLicense={handleRenewLicense}
+          />
+        ) : null}
         <Pressable style={[styles.btn, styles.btnSecondary, { marginTop: 16 }]} onPress={() => router.back()}>
           <Text style={[styles.btnText, { color: '#1D3D47' }]}>Go Back</Text>
         </Pressable>

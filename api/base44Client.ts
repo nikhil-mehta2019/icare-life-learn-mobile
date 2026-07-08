@@ -12,6 +12,9 @@
 export const BASE_URL = 'https://icare-life-learn.base44.app/api';
 export const API_KEY = '6af260f41e2140b9950788621360c5cf';
 
+const ICARE_VIDEO_API_BASE = 'http://35.154.164.178:8000';
+const ICARE_VIDEO_API_KEY = 'sk_icare_1b75de18308eb135e2df9ef29aef825266eea22041f8e4a9';
+
 const defaultHeaders: Record<string, string> = {
   'Content-Type': 'application/json',
   'api_key': API_KEY,
@@ -235,24 +238,23 @@ export async function getMuxToken(playbackId: string): Promise<MuxTokenResponse>
  */
 export async function getMuxDownloadToken(
   playbackId: string,
-  jwt?: string
+  _jwt?: string
 ): Promise<MuxDownloadTokenResponse> {
-  if (jwt) {
-    const response = await fetch(`${BASE_URL}/functions/getMuxDownloadToken`, {
-      method: 'POST',
-      headers: {
-        ...defaultHeaders,
-        'Authorization': `Bearer ${jwt}`,
-      },
-      body: JSON.stringify({ playbackId }),
-    });
-    const data = await response.json();
-    if (!response.ok) {
-      throw new Error((data as any)?.error ?? `getMuxDownloadToken failed (${response.status})`);
-    }
-    return data as MuxDownloadTokenResponse;
+  const response = await fetch(
+    `${ICARE_VIDEO_API_BASE}/videos/by-mux-id/${encodeURIComponent(playbackId)}/download`,
+    { headers: { 'X-API-Key': ICARE_VIDEO_API_KEY } }
+  );
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error((data as any)?.detail ?? `Download token fetch failed (${response.status})`);
   }
-  return apiPost<MuxDownloadTokenResponse>('/functions/getMuxDownloadToken', { playbackId }, true);
+  const offline = (data as any).offline ?? {};
+  return {
+    drmEnabled: !!(data as any).drm_enabled,
+    manifestUrl: offline.manifest_url ?? (data as any).download_url ?? '',
+    drmToken: offline.drm_token ?? '',
+    widevineLicenseUrl: offline.widevine_license_url ?? '',
+  };
 }
 
 /**
