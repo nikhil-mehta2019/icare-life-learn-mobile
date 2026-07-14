@@ -44,6 +44,7 @@ import {
   getMuxDownloadToken,
 } from '../../api/base44Client';
 import { waitForPlayerData, type BridgeResult } from '../../api/playerCache';
+import { TrackSelectionModal } from '../../components/track-selection-modal';
 import { requestWebViewTokens, getAuthJwt } from '../(tabs)/explore';
 import IcareOfflineDrm, {
   onDownloadProgress,
@@ -352,6 +353,13 @@ export default function ChapterPlayerScreen() {
   const [initialPositionSeconds, setInitialPositionSeconds] = useState(0);
   // Guard: true while handleDownload is running — prevents concurrent executions.
   const [isDownloadPending, setIsDownloadPending] = useState(false);
+  // Track-selection modal state — shown only when a chapter has >1 audio/caption language.
+  const [trackPickerVisible, setTrackPickerVisible] = useState(false);
+  const pendingDownloadRef = useRef<{
+    chapterId: string;
+    chapter: Chapter;
+    dlTokens: Awaited<ReturnType<typeof getMuxDownloadToken>>;
+  } | null>(null);
 
   // ── initial load ──
   useEffect(() => {
@@ -589,6 +597,18 @@ export default function ChapterPlayerScreen() {
         return;
       }
 
+      // Only show the track picker when there's an actual choice to make —
+      // otherwise proceed straight to download (current "all languages" behavior).
+      const hasTrackChoice =
+        (dlTokens.audioLanguages?.length ?? 0) > 1 ||
+        (dlTokens.captionLanguages?.length ?? 0) > 1;
+
+      if (hasTrackChoice) {
+        pendingDownloadRef.current = { chapterId, chapter, dlTokens };
+        setTrackPickerVisible(true);
+        return;
+      }
+
       await IcareOfflineDrm.startDownload({
         id:            chapterId,
         manifestUrl:   dlTokens.manifestUrl,
@@ -607,6 +627,42 @@ export default function ChapterPlayerScreen() {
       setIsDownloadPending(false);
     }
   }, [chapter, chapterId, isDownloadPending]);
+
+  const handleTrackSelectionCancel = useCallback(() => {
+    pendingDownloadRef.current = null;
+    setTrackPickerVisible(false);
+    setIsDownloadPending(false);
+  }, []);
+
+  const handleTrackSelectionConfirm = useCallback(
+    async (selection: { languages: string[]; audioLanguages: string[]; captionLanguages: string[] }) => {
+      const pending = pendingDownloadRef.current;
+      setTrackPickerVisible(false);
+      if (!pending) return;
+      try {
+        await IcareOfflineDrm.startDownload({
+          id:            pending.chapterId,
+          manifestUrl:   pending.dlTokens.manifestUrl,
+          drmLicenseUrl: pending.dlTokens.widevineLicenseUrl ?? '',
+          drmToken:      pending.dlTokens.drmToken ?? '',
+          title:         pending.chapter.title,
+          thumbnailUrl:  (pending.chapter as any).videoPosterUrl ?? undefined,
+          durationSeconds: (pending.chapter as any).estimatedMinutes
+            ? Math.round((pending.chapter as any).estimatedMinutes * 60)
+            : undefined,
+          audioLanguages: selection.audioLanguages,
+          captionLanguages: selection.captionLanguages,
+        });
+      } catch (err: any) {
+        console.error(`[player] handleTrackSelectionConfirm: FAILED — ${err?.message}`);
+        Alert.alert('Download failed', err?.message ?? String(err));
+      } finally {
+        pendingDownloadRef.current = null;
+        setIsDownloadPending(false);
+      }
+    },
+    [],
+  );
 
   // ── delete-download handler ──
   // Uses resolveTokens() so the fast-path (tokens already in state) is taken
@@ -720,6 +776,13 @@ export default function ChapterPlayerScreen() {
         <Pressable style={[styles.btn, styles.btnSecondary, { marginTop: 16 }]} onPress={() => router.back()}>
           <Text style={[styles.btnText, { color: '#1D3D47' }]}>Go Back</Text>
         </Pressable>
+        <TrackSelectionModal
+          visible={trackPickerVisible}
+          audioLanguages={pendingDownloadRef.current?.dlTokens.audioLanguages ?? []}
+          captionLanguages={pendingDownloadRef.current?.dlTokens.captionLanguages ?? []}
+          onCancel={handleTrackSelectionCancel}
+          onConfirm={handleTrackSelectionConfirm}
+        />
       </View>
     );
   }
@@ -760,21 +823,30 @@ export default function ChapterPlayerScreen() {
   }
 
   return (
-    <VideoPlayer
-      source={source!}
-      drm={drm as Record<string, any> | undefined}
-      chapter={chapter}
-      mode={mode as 'online' | 'offline'}
-      offline={offline}
-      download={download}
-      chapterId={chapterId ?? ''}
-      initialPositionSeconds={initialPositionSeconds}
-      isDownloadPending={isDownloadPending}
-      onDownload={handleDownload}
-      onDelete={handleDeleteDownload}
-      onGoToDownloads={handleGoToDownloads}
-      onRenewLicense={handleRenewLicense}
-    />
+    <>
+      <VideoPlayer
+        source={source!}
+        drm={drm as Record<string, any> | undefined}
+        chapter={chapter}
+        mode={mode as 'online' | 'offline'}
+        offline={offline}
+        download={download}
+        chapterId={chapterId ?? ''}
+        initialPositionSeconds={initialPositionSeconds}
+        isDownloadPending={isDownloadPending}
+        onDownload={handleDownload}
+        onDelete={handleDeleteDownload}
+        onGoToDownloads={handleGoToDownloads}
+        onRenewLicense={handleRenewLicense}
+      />
+      <TrackSelectionModal
+        visible={trackPickerVisible}
+        audioLanguages={pendingDownloadRef.current?.dlTokens.audioLanguages ?? []}
+        captionLanguages={pendingDownloadRef.current?.dlTokens.captionLanguages ?? []}
+        onCancel={handleTrackSelectionCancel}
+        onConfirm={handleTrackSelectionConfirm}
+      />
+    </>
   );
 }
 

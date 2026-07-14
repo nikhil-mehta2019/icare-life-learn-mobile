@@ -47,13 +47,14 @@
  */
 
 import { useRouter, type Href } from 'expo-router';
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, Platform, StyleSheet } from 'react-native';
 import { WebView, type WebViewMessageEvent } from 'react-native-webview';
 import type { ShouldStartLoadRequest } from 'react-native-webview/lib/WebViewTypes';
 import { deliverPlayerData, deliverPlayerError } from '../../api/playerCache';
 import { API_KEY, BASE_URL } from '../../api/base44Client';
 import IcareOfflineDrm from '../../modules/icare-offline-drm';
+import { TrackSelectionModal } from '../../components/track-selection-modal';
 
 const BASE44_URL = 'https://icare-life-learn.base44.app';
 
@@ -705,6 +706,14 @@ const INJECTED_JS = `
 export default function ExploreScreen() {
   const router = useRouter();
   const webRef = useRef<WebView>(null);
+  const [trackPickerVisible, setTrackPickerVisible] = useState(false);
+  const pendingDownloadRef = useRef<{
+    chapterId: string;
+    title: string;
+    thumbnailUrl?: string;
+    durationSeconds?: number;
+    dlTokens: any;
+  } | null>(null);
 
   /**
    * Triggers a fresh token fetch inside the WebView for a specific chapter.
@@ -864,6 +873,23 @@ export default function ExploreScreen() {
             dlChapter?.estimatedMinutes
               ? Math.round(dlChapter.estimatedMinutes * 60)
               : undefined;
+
+          const hasTrackChoice =
+            (dlTokens?.audioLanguages?.length ?? 0) > 1 ||
+            (dlTokens?.captionLanguages?.length ?? 0) > 1;
+
+          if (hasTrackChoice) {
+            pendingDownloadRef.current = {
+              chapterId,
+              title: chapterTitle,
+              thumbnailUrl,
+              durationSeconds,
+              dlTokens,
+            };
+            setTrackPickerVisible(true);
+            break;
+          }
+
           IcareOfflineDrm.startDownload({
             id:            chapterId,
             manifestUrl:   dlTokens.manifestUrl,
@@ -902,6 +928,8 @@ export default function ExploreScreen() {
               manifestUrl: offline.manifest_url ?? data.download_url ?? '',
               drmToken: offline.drm_token ?? '',
               widevineLicenseUrl: offline.widevine_license_url ?? '',
+              audioLanguages: Array.isArray(data.audio_languages) ? data.audio_languages : [],
+              captionLanguages: Array.isArray(data.caption_languages) ? data.caption_languages : [],
             };
             webRef.current?.injectJavaScript(
               `(window.__icare_downloadTokenReady||{})[${JSON.stringify(reqId)}]&&window.__icare_downloadTokenReady[${JSON.stringify(reqId)}](null,${JSON.stringify(dlTokens)}); true;`
@@ -989,23 +1017,61 @@ export default function ExploreScreen() {
     return () => { _setTokenRequester(null); };
   }, [requestTokensFromWebView]);
 
+  const handleTrackSelectionCancel = useCallback(() => {
+    pendingDownloadRef.current = null;
+    setTrackPickerVisible(false);
+  }, []);
+
+  const handleTrackSelectionConfirm = useCallback(
+    (selection: { languages: string[]; audioLanguages: string[]; captionLanguages: string[] }) => {
+      const pending = pendingDownloadRef.current;
+      setTrackPickerVisible(false);
+      if (!pending) return;
+      IcareOfflineDrm.startDownload({
+        id:            pending.chapterId,
+        manifestUrl:   pending.dlTokens.manifestUrl,
+        drmLicenseUrl: pending.dlTokens.widevineLicenseUrl ?? '',
+        drmToken:      pending.dlTokens.drmToken ?? '',
+        title:         pending.title,
+        thumbnailUrl:  pending.thumbnailUrl,
+        durationSeconds: pending.durationSeconds,
+        audioLanguages: selection.audioLanguages,
+        captionLanguages: selection.captionLanguages,
+      }).catch((err: any) => {
+        console.error(`[explore] Download failed for chapter ${pending.chapterId}:`, err);
+        Alert.alert('Download failed', err?.message ?? String(err));
+      });
+      pendingDownloadRef.current = null;
+    },
+    [],
+  );
+
   return (
-    <WebView
-      ref={webRef}
-      source={{ uri: BASE44_URL }}
-      style={styles.webview}
-      javaScriptEnabled
-      domStorageEnabled
-      sharedCookiesEnabled
-      thirdPartyCookiesEnabled
-      allowsInlineMediaPlayback
-      allowsFullscreenVideo
-      mediaPlaybackRequiresUserAction={false}
-      androidLayerType="hardware"
-      injectedJavaScriptBeforeContentLoaded={INJECTED_JS}
-      onShouldStartLoadWithRequest={onShouldStartLoadWithRequest}
-      onMessage={onMessage}
-    />
+    <>
+      <WebView
+        ref={webRef}
+        source={{ uri: BASE44_URL }}
+        style={styles.webview}
+        javaScriptEnabled
+        domStorageEnabled
+        sharedCookiesEnabled
+        thirdPartyCookiesEnabled
+        allowsInlineMediaPlayback
+        allowsFullscreenVideo
+        mediaPlaybackRequiresUserAction={false}
+        androidLayerType="hardware"
+        injectedJavaScriptBeforeContentLoaded={INJECTED_JS}
+        onShouldStartLoadWithRequest={onShouldStartLoadWithRequest}
+        onMessage={onMessage}
+      />
+      <TrackSelectionModal
+        visible={trackPickerVisible}
+        audioLanguages={pendingDownloadRef.current?.dlTokens?.audioLanguages ?? []}
+        captionLanguages={pendingDownloadRef.current?.dlTokens?.captionLanguages ?? []}
+        onCancel={handleTrackSelectionCancel}
+        onConfirm={handleTrackSelectionConfirm}
+      />
+    </>
   );
 }
 

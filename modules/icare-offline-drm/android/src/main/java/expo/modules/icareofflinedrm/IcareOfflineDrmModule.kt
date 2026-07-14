@@ -29,6 +29,8 @@ class StartDownloadParamsRecord : Record, Serializable {
   @Field var title: String? = null
   @Field var thumbnailUrl: String? = null
   @Field var durationSeconds: Int? = null
+  @Field var audioLanguages: List<String>? = null
+  @Field var captionLanguages: List<String>? = null
 }
 
 class PlaybackSourceParamsRecord : Record, Serializable {
@@ -163,8 +165,12 @@ class IcareOfflineDrmModule : Module() {
                         .build()
                     )
 
-                    // 2. Audio — ONE group per language only
-                    for ((_, pair) in bestAudioPerLang) {
+                    // 2. Audio — ONE group per language only, optionally filtered to
+                    //    only the language(s) the user chose at download time.
+                    //    Null/empty selection = current behavior (all languages).
+                    val audioLangFilter = params.audioLanguages?.filter { it.isNotBlank() }?.toSet()
+                    for ((lang, pair) in bestAudioPerLang) {
+                      if (!audioLangFilter.isNullOrEmpty() && lang !in audioLangFilter) continue
                       val g = tga.get(pair.first)
                       h.addTrackSelection(
                         periodIndex,
@@ -176,11 +182,18 @@ class IcareOfflineDrmModule : Module() {
                       )
                     }
 
-                    // 3. Text/subtitle — include every declared group (all languages)
+                    // 3. Text/subtitle — include every declared group (all languages),
+                    //    optionally filtered to only the language(s) the user chose.
+                    //    Null/empty selection = current behavior (all languages).
+                    val captionLangFilter = params.captionLanguages?.filter { it.isNotBlank() }?.toSet()
                     for (i in 0 until tga.length) {
                       val g = tga.get(i)
                       if (g.length == 0) continue
                       if (!MimeTypes.isText(g.getFormat(0).sampleMimeType ?: "")) continue
+                      if (!captionLangFilter.isNullOrEmpty()) {
+                        val lang = g.getFormat(0).language ?: "und"
+                        if (lang !in captionLangFilter) continue
+                      }
                       h.addTrackSelection(
                         periodIndex,
                         defaultParams.buildUpon()

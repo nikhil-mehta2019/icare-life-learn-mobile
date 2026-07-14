@@ -112,6 +112,10 @@ export interface MuxDownloadTokenResponse {
   manifestUrl: string;
   drmToken: string | null;
   widevineLicenseUrl: string | null;
+  /** Available audio language codes for this video (empty = unknown/single language). */
+  audioLanguages: string[];
+  /** Available caption language codes for this video (empty = unknown/no captions). */
+  captionLanguages: string[];
 }
 
 export interface StudentAccessResponse {
@@ -254,6 +258,8 @@ export async function getMuxDownloadToken(
     manifestUrl: offline.manifest_url ?? (data as any).download_url ?? '',
     drmToken: offline.drm_token ?? '',
     widevineLicenseUrl: offline.widevine_license_url ?? '',
+    audioLanguages: Array.isArray((data as any).audio_languages) ? (data as any).audio_languages : [],
+    captionLanguages: Array.isArray((data as any).caption_languages) ? (data as any).caption_languages : [],
   };
 }
 
