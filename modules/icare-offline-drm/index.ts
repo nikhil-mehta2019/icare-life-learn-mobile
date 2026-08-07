@@ -1,8 +1,6 @@
 import { requireNativeModule, EventEmitter } from 'expo-modules-core';
 import { Platform } from 'react-native';
 
-// ----- Types ------------------------------------------------------------
-
 export type DownloadState =
   | 'queued'
   | 'downloading'
@@ -13,37 +11,27 @@ export type DownloadState =
   | 'stopped';
 
 export interface DownloadInfo {
-  id: string;                  // chapterId — used as the download key
+  id: string;
   state: DownloadState;
   bytesDownloaded: number;
-  contentLength: number;       // -1 if unknown
-  percentDownloaded: number;   // 0..100, -1 if unknown
+  contentLength: number;
+  percentDownloaded: number;
   failureReason?: string | null;
-  // ── enriched fields (set by Kotlin toMap) ──
-  title?: string | null;           // human-readable chapter title
-  downloadedAt?: string | null;    // ISO-8601 timestamp when download completed
-  thumbnailUrl?: string | null;    // poster image URL
-  durationSeconds?: number | null; // video duration in seconds
+  title?: string | null;
+  downloadedAt?: string | null;
+  thumbnailUrl?: string | null;
+  durationSeconds?: number | null;
 }
 
 export interface StartDownloadParams {
-  /** Use chapterId so we can look the download up later. */
   id: string;
-  /** Pre-signed HLS .m3u8 URL — what `secureStreamUrl` from getMuxToken returns. */
   manifestUrl: string;
-  /** Widevine license server URL — `drmLicenseUrl` from getMuxToken. */
   drmLicenseUrl: string;
-  /** Widevine license token — `drmToken` from getMuxToken. Sent as `x-mux-license-token` header. */
   drmToken: string;
-  /** Human-readable chapter title for the notification + downloads UI. */
   title?: string;
-  /** Thumbnail/poster image URL for the downloads UI card. */
   thumbnailUrl?: string;
-  /** Chapter duration in seconds (from estimatedMinutes * 60). */
   durationSeconds?: number;
-  /** Audio language codes to download (e.g. ["en", "es"]). Omit/empty = all languages. */
   audioLanguages?: string[];
-  /** Caption/subtitle language codes to download. Omit/empty = all languages. */
   captionLanguages?: string[];
 }
 
@@ -52,13 +40,8 @@ export interface PlaybackSourceParams {
 }
 
 export interface OfflinePlaybackSource {
-  /** Local cache key for ExoPlayer's DownloadCache. The native module passes
-   *  this back to react-native-video via the `cacheKey` prop. */
   cacheKey: string;
-  /** Original manifest URL we downloaded from. The video player still uses
-   *  this URI; ExoPlayer transparently serves bytes from cache. */
   uri: string;
-  /** Stored Widevine offline license keySetId (base64). */
   offlineLicenseKeySetId: string;
 }
 
@@ -67,10 +50,10 @@ export interface StorageStats {
   downloadCount: number;
 }
 
-// ----- Native module wrapper -------------------------------------------
-
 const NativeModule =
   Platform.OS === 'android' ? requireNativeModule('IcareOfflineDrm') : null;
+const NativeLanguagePreferences =
+  Platform.OS === 'android' ? requireNativeModule('IcareLanguagePreferences') : null;
 
 function ensureAndroid(method: string) {
   if (Platform.OS !== 'android') {
@@ -81,11 +64,7 @@ function ensureAndroid(method: string) {
   }
 }
 
-// ----- Public API -------------------------------------------------------
-
 export const IcareOfflineDrm = {
-  /** Queue a chapter for offline download. Resolves once accepted by the
-   *  DownloadService. Listen to `onDownloadProgress` for updates. */
   async startDownload(params: StartDownloadParams): Promise<void> {
     ensureAndroid('startDownload');
     return NativeModule.startDownload(params);
@@ -106,7 +85,6 @@ export const IcareOfflineDrm = {
     return NativeModule.removeDownload(id);
   },
 
-  /** Returns all known downloads (queued, in-progress, completed). */
   async listDownloads(): Promise<DownloadInfo[]> {
     if (Platform.OS !== 'android') return [];
     return NativeModule.listDownloads();
@@ -117,8 +95,6 @@ export const IcareOfflineDrm = {
     return NativeModule.getDownload(id);
   },
 
-  /** Resolve a chapter ID to an offline playback source if it's downloaded
-   *  AND has a valid (non-expired) offline Widevine license. */
   async getOfflineSource(
     params: PlaybackSourceParams
   ): Promise<OfflinePlaybackSource | null> {
@@ -126,8 +102,6 @@ export const IcareOfflineDrm = {
     return NativeModule.getOfflineSource(params);
   },
 
-  /** Renew an offline Widevine license (e.g. before it expires). Requires a
-   *  fresh drmToken/drmLicenseUrl from getMuxToken. */
   async renewOfflineLicense(
     id: string,
     drmLicenseUrl: string,
@@ -137,25 +111,31 @@ export const IcareOfflineDrm = {
     return NativeModule.renewOfflineLicense(id, drmLicenseUrl, drmToken);
   },
 
-  /** Returns total bytes used by downloaded content + count of completed downloads. */
   async getStorageStats(): Promise<StorageStats> {
     if (Platform.OS !== 'android') return { usedBytes: 0, downloadCount: 0 };
     return NativeModule.getStorageStats();
   },
 
   /**
-   * Launch the native offline player Activity for a completed DRM download.
-   * Uses ExoPlayer with the persisted Widevine keySetId — bypasses react-native-video
-   * which does not support offline DRM license restore via keySetId.
-   * Throws if no completed download exists for this id.
+   * Persist the learner's ordered three-language contract in native storage.
+   * This does not alter download selection; the offline player uses it only
+   * for visibility, ordering and default audio/caption selection.
    */
+  async setPreferredLanguages(codes: string[]): Promise<string[]> {
+    if (Platform.OS !== 'android') return codes.slice(0, 3);
+    return NativeLanguagePreferences.setPreferredLanguages(codes);
+  },
+
+  async getPreferredLanguages(): Promise<string[]> {
+    if (Platform.OS !== 'android') return [];
+    return NativeLanguagePreferences.getPreferredLanguages();
+  },
+
   async launchOfflinePlayer(id: string): Promise<void> {
     ensureAndroid('launchOfflinePlayer');
     return NativeModule.launchOfflinePlayer(id);
   },
 };
-
-// ----- Events -----------------------------------------------------------
 
 export type DownloadProgressEvent = DownloadInfo;
 
