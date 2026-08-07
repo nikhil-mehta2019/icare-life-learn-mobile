@@ -64,6 +64,24 @@ function ensureAndroid(method: string) {
   }
 }
 
+async function refreshNativeLanguagePreferences(): Promise<void> {
+  if (Platform.OS !== 'android') return;
+  try {
+    // The Explore WebView owns the in-memory authenticated JWT. Dynamic imports
+    // avoid introducing a static screen/module cycle and let existing downloads
+    // pick up newly changed learner preferences before native playback starts.
+    const explore = await import('../../app/(tabs)/explore');
+    const jwt = explore.getAuthJwt?.();
+    if (!jwt) return;
+    const client = await import('../../api/base44Client');
+    await client.fetchUserPreferences(jwt);
+  } catch (error) {
+    // Offline launch must never depend on network/session availability. The
+    // native store retains the last successfully synced ordered preference trio.
+    console.warn('[IcareOfflineDrm] language preference refresh skipped', error);
+  }
+}
+
 export const IcareOfflineDrm = {
   async startDownload(params: StartDownloadParams): Promise<void> {
     ensureAndroid('startDownload');
@@ -133,6 +151,7 @@ export const IcareOfflineDrm = {
 
   async launchOfflinePlayer(id: string): Promise<void> {
     ensureAndroid('launchOfflinePlayer');
+    await refreshNativeLanguagePreferences();
     return NativeModule.launchOfflinePlayer(id);
   },
 };
