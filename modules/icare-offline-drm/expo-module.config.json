@@ -3,7 +3,8 @@
   "android": {
     "modules": [
       "expo.modules.icareofflinedrm.IcareOfflineDrmModule",
-      "expo.modules.icareofflinedrm.IcareLanguagePreferencesModule"
+      "expo.modules.icareofflinedrm.IcareLanguagePreferencesModule",
+      "expo.modules.icareofflinedrm.IcareDownloadManagerModule"
     ]
   }
 }
