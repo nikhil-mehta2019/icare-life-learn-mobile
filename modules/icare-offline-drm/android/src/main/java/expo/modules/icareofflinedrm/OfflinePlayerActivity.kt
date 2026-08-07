@@ -26,6 +26,7 @@ import androidx.media3.exoplayer.drm.DrmSessionManagerProvider
 import androidx.media3.exoplayer.drm.FrameworkMediaDrm
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.ui.PlayerView
+import java.util.Locale
 
 private const val TAG = "OfflinePlayerActivity"
 
@@ -37,7 +38,7 @@ class OfflinePlayerActivity : Activity() {
         const val EXTRA_TITLE       = "chapter_title"
     }
 
-    private data class AudioChoice(
+    private data class TrackChoice(
         val key: String,
         val label: String,
         val group: androidx.media3.common.TrackGroup,
@@ -48,10 +49,17 @@ class OfflinePlayerActivity : Activity() {
     private var player: ExoPlayer? = null
     private var playerView: PlayerView? = null
     private var audioButton: TextView? = null
-    private var audioChoices: List<AudioChoice> = emptyList()
+    private var captionButton: TextView? = null
+    private var audioChoices: List<TrackChoice> = emptyList()
+    private var captionChoices: List<TrackChoice> = emptyList()
+    private var preferredCodes: List<String> = emptyList()
+    private var initialPreferencesApplied = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        preferredCodes = LanguagePreferenceStore.get(applicationContext)
+        Log.d(TAG, "ordered learner language preferences=$preferredCodes")
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         window.decorView.systemUiVisibility = (
@@ -76,7 +84,9 @@ class OfflinePlayerActivity : Activity() {
             FrameLayout.LayoutParams.MATCH_PARENT,
         )
         pv.useController = true
-        pv.setShowSubtitleButton(true)
+        // Audio + caption language menus are controlled by this Activity so the
+        // learner sees only their configured preference intersection.
+        pv.setShowSubtitleButton(false)
         playerView = pv
         root.addView(pv)
 
@@ -106,22 +116,15 @@ class OfflinePlayerActivity : Activity() {
         closeBtn.setOnClickListener { finish() }
         root.addView(closeBtn)
 
-        val audioBtn = TextView(this)
-        audioBtn.text = "Audio"
-        audioBtn.setTextColor(0xFFFFFFFF.toInt())
-        audioBtn.textSize = 14f
-        audioBtn.gravity = Gravity.CENTER
-        audioBtn.setPadding(24, 0, 24, 0)
-        audioBtn.setBackgroundColor(0x66000000.toInt())
-        audioBtn.visibility = View.GONE
-        val audioLp = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, 80)
-        audioLp.gravity = Gravity.TOP or Gravity.END
-        audioLp.topMargin = 32
-        audioLp.rightMargin = 140
-        audioBtn.layoutParams = audioLp
+        val audioBtn = makeTopControl("Audio", 140)
         audioBtn.setOnClickListener { showAudioChooser() }
         audioButton = audioBtn
         root.addView(audioBtn)
+
+        val captionsBtn = makeTopControl("CC", 300)
+        captionsBtn.setOnClickListener { showCaptionChooser() }
+        captionButton = captionsBtn
+        root.addView(captionsBtn)
 
         setContentView(root)
 
@@ -198,6 +201,7 @@ class OfflinePlayerActivity : Activity() {
                 Log.e(TAG, "playback error: code=${error.errorCode} msg=${error.message}", error)
                 titleView.text = "Playback error (${error.errorCode}): ${error.message}"
             }
+
             override fun onPlaybackStateChanged(state: Int) {
                 Log.d(TAG, "playbackState=${when (state) {
                     Player.STATE_IDLE -> "IDLE"
@@ -207,7 +211,11 @@ class OfflinePlayerActivity : Activity() {
                     else -> state.toString()
                 }}")
             }
-            override fun onTracksChanged(tracks: Tracks) { rebuildAudioChoices(tracks) }
+
+            override fun onTracksChanged(tracks: Tracks) {
+                rebuildChoices(tracks)
+                applyInitialLanguagePreferences()
+            }
         })
 
         exo.setMediaSource(mediaSource)
@@ -215,65 +223,157 @@ class OfflinePlayerActivity : Activity() {
         exo.playWhenReady = true
     }
 
-    private fun rebuildAudioChoices(tracks: Tracks) {
-        val bestByLanguage = linkedMapOf<String, AudioChoice>()
+    private fun makeTopControl(text: String, rightMargin: Int): TextView {
+        return TextView(this).apply {
+            this.text = text
+            setTextColor(0xFFFFFFFF.toInt())
+            textSize = 14f
+            gravity = Gravity.CENTER
+            setPadding(24, 0, 24, 0)
+            setBackgroundColor(0x66000000.toInt())
+            visibility = View.GONE
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, 80).also {
+                it.gravity = Gravity.TOP or Gravity.END
+                it.topMargin = 32
+                it.rightMargin = rightMargin
+            }
+        }
+    }
+
+    private fun rebuildChoices(tracks: Tracks) {
+        val audioByLanguage = linkedMapOf<String, TrackChoice>()
+        val captionsByLanguage = linkedMapOf<String, TrackChoice>()
+
         for (group in tracks.groups) {
-            if (group.type != C.TRACK_TYPE_AUDIO || group.length == 0) continue
+            if (group.length == 0) continue
             for (trackIndex in 0 until group.length) {
                 if (!group.isTrackSupported(trackIndex)) continue
                 val fmt = group.getTrackFormat(trackIndex)
-                val rawLanguage = fmt.language?.trim()?.lowercase()
-                val languageKey = when {
-                    !rawLanguage.isNullOrBlank() -> rawLanguage.substringBefore('-').substringBefore('_')
-                    !fmt.label.isNullOrBlank() -> fmt.label!!.trim().lowercase()
-                    else -> "audio"
-                }
-                val candidate = AudioChoice(
+                val languageKey = LanguagePreferenceStore.normalizeCode(fmt.language ?: fmt.label)
+                if (languageKey.isBlank()) continue
+                val candidate = TrackChoice(
                     key = languageKey,
-                    label = languageDisplayName(rawLanguage, fmt.label),
+                    label = languageDisplayName(languageKey, fmt.label),
                     group = group.mediaTrackGroup,
                     trackIndex = trackIndex,
                     bitrate = if (fmt.bitrate > 0) fmt.bitrate else 0,
                 )
-                val current = bestByLanguage[languageKey]
-                if (current == null || candidate.bitrate > current.bitrate) bestByLanguage[languageKey] = candidate
+
+                when (group.type) {
+                    C.TRACK_TYPE_AUDIO -> {
+                        val current = audioByLanguage[languageKey]
+                        if (current == null || candidate.bitrate > current.bitrate) {
+                            audioByLanguage[languageKey] = candidate
+                        }
+                    }
+                    C.TRACK_TYPE_TEXT -> {
+                        if (!captionsByLanguage.containsKey(languageKey)) {
+                            captionsByLanguage[languageKey] = candidate
+                        }
+                    }
+                }
             }
         }
-        audioChoices = bestByLanguage.values.toList()
-        audioButton?.visibility = if (audioChoices.size > 1) View.VISIBLE else View.GONE
-        Log.d(TAG, "dedup audio choices=${audioChoices.joinToString { "${it.label}[${it.key}]@${it.bitrate}" }}")
+
+        audioChoices = orderAndFilter(audioByLanguage)
+        captionChoices = orderAndFilter(captionsByLanguage)
+
+        audioButton?.visibility = if (audioChoices.isNotEmpty()) View.VISIBLE else View.GONE
+        captionButton?.visibility = if (captionChoices.isNotEmpty()) View.VISIBLE else View.GONE
+
+        Log.d(TAG, "allowed audio choices=${audioChoices.joinToString { "${it.label}[${it.key}]" }}")
+        Log.d(TAG, "allowed caption choices=${captionChoices.joinToString { "${it.label}[${it.key}]" }}")
     }
 
-    private fun languageDisplayName(language: String?, label: String?): String {
-        val base = language?.lowercase()?.substringBefore('-')?.substringBefore('_')
-        return when (base) {
-            "en", "eng" -> "English Stereo"
-            "es", "spa" -> "Spanish Stereo"
-            "sw", "swa" -> "Swahili Stereo"
-            "hi", "hin" -> "Hindi Stereo"
-            "mr", "mar" -> "Marathi Stereo"
-            "gu", "guj" -> "Gujarati Stereo"
-            else -> label?.trim().takeUnless { it.isNullOrBlank() } ?: "Audio"
-        }
+    private fun orderAndFilter(byLanguage: LinkedHashMap<String, TrackChoice>): List<TrackChoice> {
+        if (preferredCodes.isEmpty()) return byLanguage.values.toList()
+        return preferredCodes.mapNotNull { byLanguage[it] }
     }
+
+    private fun applyInitialLanguagePreferences() {
+        if (initialPreferencesApplied) return
+        val currentPlayer = player ?: return
+        if (audioChoices.isEmpty() && captionChoices.isEmpty()) return
+
+        val builder = currentPlayer.trackSelectionParameters.buildUpon()
+            .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
+            .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+
+        audioChoices.firstOrNull()?.let { choice ->
+            builder.addOverride(TrackSelectionOverride(choice.group, listOf(choice.trackIndex)))
+            audioButton?.text = shortLabel(choice.label)
+            Log.d(TAG, "initial audio=${choice.label} key=${choice.key}")
+        }
+
+        val initialCaption = captionChoices.firstOrNull()
+        if (initialCaption != null) {
+            builder
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                .addOverride(TrackSelectionOverride(initialCaption.group, listOf(initialCaption.trackIndex)))
+            captionButton?.text = shortLabel(initialCaption.label)
+            Log.d(TAG, "initial captions=${initialCaption.label} key=${initialCaption.key}")
+        } else {
+            builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+            captionButton?.text = "CC"
+            Log.d(TAG, "initial captions=OFF — no preferred caption available")
+        }
+
+        currentPlayer.trackSelectionParameters = builder.build()
+        initialPreferencesApplied = true
+    }
+
+    private fun languageDisplayName(code: String, label: String?): String {
+        val display = try {
+            val locale = Locale.forLanguageTag(code)
+            locale.getDisplayLanguage(Locale.ENGLISH).takeIf { it.isNotBlank() && it != code }
+        } catch (_: Throwable) { null }
+        return display ?: label?.trim().takeUnless { it.isNullOrBlank() } ?: code.uppercase(Locale.ROOT)
+    }
+
+    private fun shortLabel(label: String): String = label.take(12)
 
     private fun showAudioChooser() {
         val choices = audioChoices
         if (choices.isEmpty()) return
-        val labels = arrayOf("Auto", *choices.map { it.label }.toTypedArray())
+        val labels = choices.map { it.label }.toTypedArray()
         AlertDialog.Builder(this)
-            .setTitle("Audio")
+            .setTitle("Audio language")
             .setSingleChoiceItems(labels, -1) { dialog, which ->
                 val currentPlayer = player ?: return@setSingleChoiceItems
-                val builder = currentPlayer.trackSelectionParameters.buildUpon().clearOverridesOfType(C.TRACK_TYPE_AUDIO)
-                if (which > 0) {
-                    val choice = choices[which - 1]
-                    builder.addOverride(TrackSelectionOverride(choice.group, listOf(choice.trackIndex)))
-                    audioButton?.text = choice.label.substringBefore(" Stereo")
-                    Log.d(TAG, "audio selected=${choice.label} key=${choice.key} bitrate=${choice.bitrate}")
+                val choice = choices[which]
+                val builder = currentPlayer.trackSelectionParameters.buildUpon()
+                    .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
+                    .addOverride(TrackSelectionOverride(choice.group, listOf(choice.trackIndex)))
+                currentPlayer.trackSelectionParameters = builder.build()
+                audioButton?.text = shortLabel(choice.label)
+                Log.d(TAG, "audio selected=${choice.label} key=${choice.key} bitrate=${choice.bitrate}")
+                dialog.dismiss()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showCaptionChooser() {
+        val choices = captionChoices
+        if (choices.isEmpty()) return
+        val labels = arrayOf("Off", *choices.map { it.label }.toTypedArray())
+        AlertDialog.Builder(this)
+            .setTitle("Captions")
+            .setSingleChoiceItems(labels, -1) { dialog, which ->
+                val currentPlayer = player ?: return@setSingleChoiceItems
+                val builder = currentPlayer.trackSelectionParameters.buildUpon()
+                    .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                if (which == 0) {
+                    builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                    captionButton?.text = "CC"
+                    Log.d(TAG, "captions selected=OFF")
                 } else {
-                    audioButton?.text = "Audio"
-                    Log.d(TAG, "audio selected=Auto")
+                    val choice = choices[which - 1]
+                    builder
+                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                        .addOverride(TrackSelectionOverride(choice.group, listOf(choice.trackIndex)))
+                    captionButton?.text = shortLabel(choice.label)
+                    Log.d(TAG, "captions selected=${choice.label} key=${choice.key}")
                 }
                 currentPlayer.trackSelectionParameters = builder.build()
                 dialog.dismiss()
@@ -284,12 +384,15 @@ class OfflinePlayerActivity : Activity() {
 
     override fun onStart() { super.onStart(); player?.play() }
     override fun onStop() { super.onStop(); player?.pause() }
+
     override fun onDestroy() {
         super.onDestroy()
         playerView?.player = null
         player?.release()
         player = null
         audioChoices = emptyList()
+        captionChoices = emptyList()
         audioButton = null
+        captionButton = null
     }
 }
