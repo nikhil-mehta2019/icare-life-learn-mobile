@@ -110,7 +110,9 @@ class OfflinePlayerActivity : Activity() {
         closeBtn.setBackgroundColor(0x66000000.toInt())
         val closeLp = FrameLayout.LayoutParams(96, 96)
         closeLp.gravity = Gravity.TOP or Gravity.END
-        closeLp.topMargin = 24
+        // Keep the exit affordance out of the immersive/cinema-mode edge area.
+        // This is deliberately 50 px lower than the previous 24 px position.
+        closeLp.topMargin = 74
         closeLp.rightMargin = 24
         closeBtn.layoutParams = closeLp
         closeBtn.contentDescription = "Close offline player"
