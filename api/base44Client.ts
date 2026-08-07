@@ -7,9 +7,6 @@ import IcareOfflineDrm from '../modules/icare-offline-drm';
 export const BASE_URL = 'https://icare-life-learn.base44.app/api';
 export const API_KEY = '6af260f41e2140b9950788621360c5cf';
 
-const ICARE_VIDEO_API_BASE = 'http://35.154.164.178:8000';
-const ICARE_VIDEO_API_KEY = 'sk_icare_1b75de18308eb135e2df9ef29aef825266eea22041f8e4a9';
-
 const defaultHeaders: Record<string, string> = {
   'Content-Type': 'application/json',
   'api_key': API_KEY,
@@ -45,6 +42,7 @@ export interface Course {
   trialAllowed?: boolean;
   defaultTrialDays?: number;
   includedInOTTSubscription?: boolean;
+  validityDays?: number;
   created_date?: string;
   updated_date?: string;
 }
@@ -105,6 +103,10 @@ export interface MuxDownloadTokenResponse {
   widevineLicenseUrl: string | null;
   audioLanguages: string[];
   captionLanguages: string[];
+  courseId?: string | null;
+  chapterId?: string | null;
+  courseAccessReason?: string | null;
+  courseAccessExpiresAt?: string | null;
 }
 
 export interface UserPreferences {
@@ -204,27 +206,73 @@ export async function getMuxToken(playbackId: string): Promise<MuxTokenResponse>
   return apiPost<MuxTokenResponse>('/functions/getMuxToken', { playbackId }, true);
 }
 
+/**
+ * Authorize an offline download through the Course App entitlement gate.
+ *
+ * The previous implementation called the iCare Play API directly with a static
+ * API key bundled in the APK. That bypassed course-expiry/agency/purchase rules.
+ * New downloads now require the learner JWT and Base44 resolves the authoritative
+ * playback → chapter → course relationship server-side before proxying to Play.
+ */
 export async function getMuxDownloadToken(
   playbackId: string,
-  _jwt?: string
+  jwt?: string
 ): Promise<MuxDownloadTokenResponse> {
-  const response = await fetch(
-    `${ICARE_VIDEO_API_BASE}/videos/by-mux-id/${encodeURIComponent(playbackId)}/download`,
-    { headers: { 'X-API-Key': ICARE_VIDEO_API_KEY } }
-  );
-  const data = await response.json();
-  if (!response.ok) {
-    throw new Error((data as any)?.detail ?? `Download token fetch failed (${response.status})`);
+  if (!jwt) {
+    throw new Error('Your session must be refreshed before downloading. Please reconnect and try again.');
   }
-  const offline = (data as any).offline ?? {};
-  return {
-    drmEnabled: !!(data as any).drm_enabled,
-    manifestUrl: offline.manifest_url ?? (data as any).download_url ?? '',
-    drmToken: offline.drm_token ?? '',
-    widevineLicenseUrl: offline.widevine_license_url ?? '',
-    audioLanguages: (data as any).audio_languages ?? [],
-    captionLanguages: (data as any).caption_languages ?? [],
+
+  const response = await fetch(`${BASE_URL}/functions/getMuxDownloadToken`, {
+    method: 'POST',
+    headers: {
+      ...defaultHeaders,
+      Authorization: `Bearer ${jwt}`,
+    },
+    body: JSON.stringify({ playbackId }),
+  });
+  const data = await response.json().catch(() => ({} as any));
+  if (!response.ok) {
+    const code = (data as any)?.error ?? `Download authorization failed (${response.status})`;
+    if (code === 'no_course_access') {
+      throw new Error('Your access to this course has expired or is no longer active.');
+    }
+    if (code === 'agency_access_restricted') {
+      throw new Error('Your course access is currently restricted. Please contact your agency.');
+    }
+    throw new Error(code);
+  }
+
+  const d = data as any;
+  const result: MuxDownloadTokenResponse = {
+    drmEnabled: !!d.drmEnabled,
+    manifestUrl: d.manifestUrl ?? '',
+    drmToken: d.drmToken ?? '',
+    widevineLicenseUrl: d.widevineLicenseUrl ?? '',
+    // The Course App authorization endpoint intentionally need not expose the
+    // upstream catalogue. The caller can pass the learner's preferred codes;
+    // native playback still filters to tracks actually present in the download.
+    audioLanguages: Array.isArray(d.audioLanguages) ? d.audioLanguages : [],
+    captionLanguages: Array.isArray(d.captionLanguages) ? d.captionLanguages : [],
+    courseId: d.courseId ?? null,
+    chapterId: d.chapterId ?? null,
+    courseAccessReason: d.courseAccessReason ?? null,
+    courseAccessExpiresAt: d.courseAccessExpiresAt ?? null,
   };
+
+  if (result.chapterId) {
+    try {
+      await IcareOfflineDrm.setDownloadEntitlement({
+        id: result.chapterId,
+        courseId: result.courseId,
+        chapterId: result.chapterId,
+        accessExpiresAt: result.courseAccessExpiresAt,
+      });
+    } catch (error) {
+      console.warn('[base44Client] Could not persist download entitlement metadata', error);
+    }
+  }
+
+  return result;
 }
 
 function normalizePreferenceCodes(value: unknown): string[] {
