@@ -86,8 +86,6 @@ class OfflinePlayerActivity : Activity() {
             FrameLayout.LayoutParams.MATCH_PARENT,
         )
         pv.useController = true
-        // Audio + caption language menus are controlled by this Activity so the
-        // learner sees only their configured preference intersection.
         pv.setShowSubtitleButton(false)
         playerView = pv
         root.addView(pv)
@@ -119,12 +117,14 @@ class OfflinePlayerActivity : Activity() {
         closeBtn.setOnClickListener { finish() }
         root.addView(closeBtn)
 
-        val audioBtn = makeTopControl("AUDIO TRACK", "Audio", 136, 220)
+        // Single-line landscape chips avoid the clipped two-line treatment while
+        // keeping control identity and active language visible at all times.
+        val audioBtn = makeTopControl("AUDIO", "Audio", 136, 250)
         audioBtn.setOnClickListener { showAudioChooser() }
         audioButton = audioBtn
         root.addView(audioBtn)
 
-        val captionsBtn = makeTopControl("CC · SUBTITLES", "CC", 372, 240)
+        val captionsBtn = makeTopControl("CC", "CC", 402, 250)
         captionsBtn.setOnClickListener { showCaptionChooser() }
         captionButton = captionsBtn
         root.addView(captionsBtn)
@@ -234,17 +234,16 @@ class OfflinePlayerActivity : Activity() {
     ): TextView {
         return TextView(this).apply {
             setTextColor(0xFFFFFFFF.toInt())
-            textSize = 14f
-            gravity = Gravity.CENTER_VERTICAL
-            setLines(2)
-            setLineSpacing(2f, 1f)
-            setPadding(20, 8, 20, 8)
-            setBackgroundColor(0x99000000.toInt())
+            textSize = 13f
+            gravity = Gravity.CENTER
+            maxLines = 1
+            setPadding(18, 0, 18, 0)
+            setBackgroundColor(0xB3000000.toInt())
             visibility = View.GONE
             setControlText(this, label, value)
-            layoutParams = FrameLayout.LayoutParams(width, 88).also {
+            layoutParams = FrameLayout.LayoutParams(width, 64).also {
                 it.gravity = Gravity.TOP or Gravity.END
-                it.topMargin = 28
+                it.topMargin = 30
                 it.rightMargin = rightMargin
             }
         }
@@ -252,7 +251,7 @@ class OfflinePlayerActivity : Activity() {
 
     private fun setControlText(button: TextView, label: String, value: String) {
         val visibleValue = shortLabel(value)
-        button.text = "$label  ▾\n$visibleValue"
+        button.text = "$label · $visibleValue  ▾"
         button.contentDescription = "$label, $value. Double tap to change."
     }
 
@@ -311,7 +310,7 @@ class OfflinePlayerActivity : Activity() {
         audioChoices.firstOrNull()?.let { choice ->
             builder.addOverride(TrackSelectionOverride(choice.group, listOf(choice.trackIndex)))
             selectedAudioKey = choice.key
-            audioButton?.let { setControlText(it, "AUDIO TRACK", choice.label) }
+            audioButton?.let { setControlText(it, "AUDIO", choice.label) }
             Log.d(TAG, "initial audio=${choice.label} key=${choice.key}")
         }
 
@@ -321,12 +320,12 @@ class OfflinePlayerActivity : Activity() {
                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
                 .addOverride(TrackSelectionOverride(initialCaption.group, listOf(initialCaption.trackIndex)))
             selectedCaptionKey = initialCaption.key
-            captionButton?.let { setControlText(it, "CC · SUBTITLES", initialCaption.label) }
+            captionButton?.let { setControlText(it, "CC", initialCaption.label) }
             Log.d(TAG, "initial captions=${initialCaption.label} key=${initialCaption.key}")
         } else {
             builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
             selectedCaptionKey = null
-            captionButton?.let { setControlText(it, "CC · SUBTITLES", "Off") }
+            captionButton?.let { setControlText(it, "CC", "Off") }
             Log.d(TAG, "initial captions=OFF — no preferred caption available")
         }
 
@@ -342,7 +341,7 @@ class OfflinePlayerActivity : Activity() {
         return display ?: label?.trim().takeUnless { it.isNullOrBlank() } ?: code.uppercase(Locale.ROOT)
     }
 
-    private fun shortLabel(label: String): String = label.take(18)
+    private fun shortLabel(label: String): String = label.take(16)
 
     private fun showAudioChooser() {
         val choices = audioChoices
@@ -359,7 +358,7 @@ class OfflinePlayerActivity : Activity() {
                     .addOverride(TrackSelectionOverride(choice.group, listOf(choice.trackIndex)))
                 currentPlayer.trackSelectionParameters = builder.build()
                 selectedAudioKey = choice.key
-                audioButton?.let { setControlText(it, "AUDIO TRACK", choice.label) }
+                audioButton?.let { setControlText(it, "AUDIO", choice.label) }
                 Log.d(TAG, "audio selected=${choice.label} key=${choice.key} bitrate=${choice.bitrate}")
                 dialog.dismiss()
             }
@@ -381,7 +380,7 @@ class OfflinePlayerActivity : Activity() {
                 if (which == 0) {
                     builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
                     selectedCaptionKey = null
-                    captionButton?.let { setControlText(it, "CC · SUBTITLES", "Off") }
+                    captionButton?.let { setControlText(it, "CC", "Off") }
                     Log.d(TAG, "captions selected=OFF")
                 } else {
                     val choice = choices[which - 1]
@@ -389,7 +388,7 @@ class OfflinePlayerActivity : Activity() {
                         .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
                         .addOverride(TrackSelectionOverride(choice.group, listOf(choice.trackIndex)))
                     selectedCaptionKey = choice.key
-                    captionButton?.let { setControlText(it, "CC · SUBTITLES", choice.label) }
+                    captionButton?.let { setControlText(it, "CC", choice.label) }
                     Log.d(TAG, "captions selected=${choice.label} key=${choice.key}")
                 }
                 currentPlayer.trackSelectionParameters = builder.build()
