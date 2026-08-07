@@ -1,10 +1,8 @@
-import * as FileSystem from 'expo-file-system';
 import { useRouter, type Href } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  Animated,
   Image,
   Modal,
   Platform,
@@ -15,17 +13,15 @@ import {
   Text,
   View,
 } from 'react-native';
+import { fetchChapter, fetchCourse, fetchModule } from '../../api/base44Client';
 import IcareOfflineDrm, {
   onDownloadProgress,
+  type DeviceStorageStats,
+  type DownloadEntitlement,
   type DownloadInfo,
 } from '../../modules/icare-offline-drm';
-import { fetchChapter, fetchCourse, fetchModule } from '../../api/base44Client';
 import { getAllProgress, type ChapterProgress } from '../../store/offlineProgress';
 
-// ─── Constants ──────────────────────────────────────────────────────────────────
-
-const BRAND = '#1D3D47';
-const BRAND_LIGHT = '#2A5568';
 const BG = '#0F1923';
 const CARD_BG = '#1C2B35';
 const SURFACE = '#243344';
@@ -36,17 +32,21 @@ const SUCCESS = '#66BB6A';
 const WARN = '#FFA726';
 const DANGER = '#EF5350';
 
-// ─── Helpers ────────────────────────────────────────────────────────────────────
+const ZERO_DEVICE_STORAGE: DeviceStorageStats = {
+  totalBytes: 0,
+  usedBytes: 0,
+  freeBytes: 0,
+};
 
-function fmtBytes(b: number): string {
-  if (b <= 0) return '0 B';
-  if (b < 1024 * 1024) return `${(b / 1024).toFixed(0)} KB`;
-  if (b < 1024 * 1024 * 1024) return `${(b / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(b / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+function fmtBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
 function fmtDuration(sec: number): string {
-  if (sec <= 0) return '';
+  if (!sec || sec <= 0) return '';
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
   const s = Math.floor(sec % 60);
@@ -57,151 +57,142 @@ function fmtDuration(sec: number): string {
 
 function fmtDate(iso: string | null | undefined): string {
   if (!iso) return '';
-  try {
-    return new Date(iso).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
-  } catch { return ''; }
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
 }
 
-function licenseAge(downloadedAt: string | null | undefined): 'active' | 'expiring' | 'expired' {
-  if (!downloadedAt) return 'active';
-  const ageMs = Date.now() - new Date(downloadedAt).getTime();
-  const thirtyD = 30 * 24 * 60 * 60 * 1000;
-  const fiveD = 5 * 24 * 60 * 60 * 1000;
-  if (ageMs > thirtyD) return 'expired';
-  if (ageMs > thirtyD - fiveD) return 'expiring';
+function accessState(expiresAt: string | null | undefined): 'active' | 'expiring' | 'expired' {
+  if (!expiresAt) return 'active';
+  const time = new Date(expiresAt).getTime();
+  if (!Number.isFinite(time)) return 'active';
+  const remaining = time - Date.now();
+  if (remaining <= 0) return 'expired';
+  if (remaining <= 5 * 24 * 60 * 60 * 1000) return 'expiring';
   return 'active';
 }
 
-// Returns true if s looks like a raw MongoDB ObjectId (24 hex chars) — i.e. title was never set.
-function isRawId(s: string | null | undefined): boolean {
-  return !!s && /^[0-9a-f]{24}$/i.test(s);
+function isRawId(value: string | null | undefined): boolean {
+  return !!value && /^[0-9a-f]{24}$/i.test(value);
 }
 
-// Extract a "course name" from the chapter title.
-// Titles look like "Course Name – Chapter N" or "Course Name: Chapter N".
-// If no separator, every chapter is its own group.
 function courseKey(title: string | null | undefined): string {
   if (!title) return '__ungrouped__';
-  const sep = title.indexOf(' – ') !== -1 ? ' – ' : title.indexOf(': ') !== -1 ? ': ' : null;
+  const sep = title.includes(' – ') ? ' – ' : title.includes(': ') ? ': ' : null;
   return sep ? title.split(sep)[0].trim() : title.trim();
 }
 
 interface EnrichedDownload extends DownloadInfo {
   progress: ChapterProgress | null;
-  licStatus: 'active' | 'expiring' | 'expired';
+  entitlement: DownloadEntitlement | null;
+  accessStatus: 'active' | 'expiring' | 'expired';
   courseName: string | null;
   moduleName: string | null;
 }
 
-// ─── Thumbnail Placeholder ──────────────────────────────────────────────────────
-
-function Thumbnail({ size, isActive, url }: { size: number; isActive?: boolean; url?: string | null }) {
+function Thumbnail({ size, url, showPlay = false }: { size: number; url?: string | null; showPlay?: boolean }) {
   return (
-    <View style={[thumbStyles.box, { width: size, height: size * 0.5625 }]}>
+    <View style={[styles.thumb, { width: size, height: size * 0.5625 }]}>
       {url ? (
         <Image source={{ uri: url }} style={StyleSheet.absoluteFill} resizeMode="cover" />
       ) : (
-        <>
-          <View style={thumbStyles.gradient} />
-          <Text style={thumbStyles.icon}>🎬</Text>
-        </>
+        <Text style={styles.thumbIcon}>🎬</Text>
       )}
-      {isActive && (
-        <View style={thumbStyles.playBadge}>
-          <Text style={thumbStyles.playBadgeText}>▶</Text>
+      {showPlay ? (
+        <View style={styles.playBadge}>
+          <Text style={styles.playBadgeText}>▶</Text>
         </View>
-      )}
+      ) : null}
     </View>
   );
 }
 
-const thumbStyles = StyleSheet.create({
-  box: {
-    backgroundColor: SURFACE,
-    borderRadius: 8,
-    overflow: 'hidden',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  gradient: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(29,61,71,0.4)',
-  },
-  icon: { fontSize: 28 },
-  playBadge: {
-    position: 'absolute',
-    bottom: 6,
-    right: 6,
-    backgroundColor: ACCENT,
-    borderRadius: 12,
-    width: 24,
-    height: 24,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  playBadgeText: { color: '#000', fontSize: 10, fontWeight: '900' },
-});
-
-// ─── Continue Watching row ──────────────────────────────────────────────────────
-
-function ContinueWatchingCard({
-  item,
-  onPress,
+function StorageSummary({
+  device,
+  offlineBytes,
+  count,
 }: {
-  item: EnrichedDownload;
-  onPress: () => void;
+  device: DeviceStorageStats;
+  offlineBytes: number;
+  count: number;
 }) {
-  const pct = item.progress ? Math.min(100, item.progress.percentWatched) : 0;
-  const title = item.title ?? item.id;
+  const pct = device.totalBytes > 0
+    ? Math.min(100, (device.usedBytes / device.totalBytes) * 100)
+    : 0;
+  const isLow = device.freeBytes > 0 && device.freeBytes < 2 * 1024 * 1024 * 1024;
 
   return (
-    <Pressable style={cwStyles.card} onPress={onPress} android_ripple={{ color: 'rgba(255,255,255,0.08)' }}>
-      <Thumbnail size={160} isActive url={item.thumbnailUrl} />
-      {/* Progress bar overlay at bottom */}
-      <View style={cwStyles.progressTrack}>
-        <View style={[cwStyles.progressFill, { width: `${pct}%` as any }]} />
-      </View>
-      <Text style={cwStyles.title} numberOfLines={2}>{title}</Text>
-      {item.progress && item.progress.watchedSeconds > 0 && (
-        <Text style={cwStyles.meta}>
-          {fmtDuration(item.progress.watchedSeconds)} watched · {Math.round(pct)}%
+    <View style={styles.storageCard}>
+      <View style={styles.storageTopRow}>
+        <View>
+          <Text style={styles.eyebrow}>DEVICE STORAGE</Text>
+          <Text style={styles.storageHeadline}>
+            {device.totalBytes > 0 ? `${fmtBytes(device.freeBytes)} available` : 'Storage unavailable'}
+          </Text>
+        </View>
+        <Text style={styles.storageTotal}>
+          {device.totalBytes > 0 ? `${fmtBytes(device.totalBytes)} total` : ''}
         </Text>
-      )}
-    </Pressable>
+      </View>
+
+      <View style={styles.storageTrack}>
+        <View
+          style={[
+            styles.storageFill,
+            { width: `${pct}%` as any },
+            isLow && { backgroundColor: WARN },
+          ]}
+        />
+      </View>
+
+      <View style={styles.storageMetaRow}>
+        <Text style={styles.storageMeta}>
+          Device used {fmtBytes(device.usedBytes)}
+        </Text>
+        <Text style={styles.storageMeta}>
+          iCare offline {fmtBytes(offlineBytes)} · {count} {count === 1 ? 'video' : 'videos'}
+        </Text>
+      </View>
+
+      {isLow ? (
+        <Text style={styles.storageWarning}>⚠ Low storage. Keep at least 2 GB free for reliable downloads.</Text>
+      ) : null}
+    </View>
   );
 }
 
-const cwStyles = StyleSheet.create({
-  card: {
-    width: 160,
-    marginRight: 12,
-  },
-  progressTrack: {
-    height: 3,
-    backgroundColor: 'rgba(255,255,255,0.15)',
-    borderRadius: 2,
-    marginTop: 0,
-  },
-  progressFill: {
-    height: 3,
-    backgroundColor: ACCENT,
-    borderRadius: 2,
-  },
-  title: {
-    color: TEXT,
-    fontSize: 12,
-    fontWeight: '600',
-    marginTop: 6,
-    lineHeight: 16,
-  },
-  meta: {
-    color: TEXT_MUTED,
-    fontSize: 10,
-    marginTop: 2,
-  },
-});
+function SectionHeader({ title, count }: { title: string; count: number }) {
+  return (
+    <View style={styles.sectionHeader}>
+      <Text style={styles.sectionTitle}>{title}</Text>
+      <Text style={styles.sectionCount}>{count} {count === 1 ? 'video' : 'videos'}</Text>
+    </View>
+  );
+}
 
-// ─── Download Progress Card (for active/queued) ─────────────────────────────────
+function ModuleHeader({ title, count }: { title: string; count: number }) {
+  return (
+    <View style={styles.moduleHeader}>
+      <View style={styles.moduleAccent} />
+      <Text style={styles.moduleTitle} numberOfLines={1}>{title}</Text>
+      <Text style={styles.sectionCount}>{count}</Text>
+    </View>
+  );
+}
+
+function ContinueWatchingCard({ item, onPress }: { item: EnrichedDownload; onPress: () => void }) {
+  const pct = Math.min(100, item.progress?.percentWatched ?? 0);
+  return (
+    <Pressable style={styles.continueCard} onPress={onPress}>
+      <Thumbnail size={160} url={item.thumbnailUrl} showPlay />
+      <View style={styles.watchTrack}>
+        <View style={[styles.watchFill, { width: `${pct}%` as any }]} />
+      </View>
+      <Text style={styles.compactTitle} numberOfLines={2}>{item.title ?? item.id}</Text>
+      <Text style={styles.smallMeta}>{Math.round(pct)}% watched</Text>
+    </Pressable>
+  );
+}
 
 function ActiveDownloadCard({
   item,
@@ -214,45 +205,45 @@ function ActiveDownloadCard({
   onResume: () => void;
   onCancel: () => void;
 }) {
-  const pct = item.percentDownloaded >= 0 ? item.percentDownloaded : 0;
+  const pct = item.percentDownloaded >= 0 ? Math.min(100, item.percentDownloaded) : 0;
   const isDownloading = item.state === 'downloading';
   const isFailed = item.state === 'failed';
 
   return (
-    <View style={activeStyles.card}>
-      <Thumbnail size={72} url={item.thumbnailUrl} />
-      <View style={activeStyles.content}>
-        <Text style={activeStyles.title} numberOfLines={2}>{item.title ?? item.id}</Text>
-        {isDownloading || item.state === 'queued' || item.state === 'stopped' ? (
+    <View style={styles.activeCard}>
+      <Thumbnail size={76} url={item.thumbnailUrl} />
+      <View style={{ flex: 1 }}>
+        <Text style={styles.activeTitle} numberOfLines={2}>{item.title ?? item.id}</Text>
+        {!isFailed ? (
           <>
-            <View style={activeStyles.progressRow}>
-              <View style={activeStyles.track}>
-                <Animated.View style={[activeStyles.fill, { width: `${pct}%` as any }]} />
+            <View style={styles.progressRow}>
+              <View style={styles.downloadTrack}>
+                <View style={[styles.downloadFill, { width: `${pct}%` as any }]} />
               </View>
-              <Text style={activeStyles.pctText}>{Math.round(pct)}%</Text>
+              <Text style={styles.progressPct}>{Math.round(pct)}%</Text>
             </View>
-            <Text style={activeStyles.meta}>
+            <Text style={styles.smallMeta}>
               {fmtBytes(item.bytesDownloaded)}
               {item.contentLength > 0 ? ` / ${fmtBytes(item.contentLength)}` : ''}
               {item.state === 'queued' ? ' · Queued' : item.state === 'stopped' ? ' · Paused' : ''}
             </Text>
           </>
-        ) : isFailed ? (
-          <Text style={[activeStyles.meta, { color: DANGER }]}>Download failed</Text>
-        ) : null}
-        <View style={activeStyles.actions}>
-          {isDownloading && (
-            <Pressable style={activeStyles.actionBtn} onPress={onPause}>
-              <Text style={activeStyles.actionText}>⏸ Pause</Text>
+        ) : (
+          <Text style={[styles.smallMeta, { color: DANGER }]}>Download failed</Text>
+        )}
+        <View style={styles.actionRow}>
+          {isDownloading ? (
+            <Pressable style={styles.actionButton} onPress={onPause}>
+              <Text style={styles.actionText}>⏸ Pause</Text>
             </Pressable>
-          )}
-          {(item.state === 'queued' || item.state === 'stopped' || isFailed) && (
-            <Pressable style={activeStyles.actionBtn} onPress={onResume}>
-              <Text style={activeStyles.actionText}>▶ {isFailed ? 'Retry' : 'Resume'}</Text>
+          ) : null}
+          {(item.state === 'queued' || item.state === 'stopped' || isFailed) ? (
+            <Pressable style={styles.actionButton} onPress={onResume}>
+              <Text style={styles.actionText}>▶ {isFailed ? 'Retry' : 'Resume'}</Text>
             </Pressable>
-          )}
-          <Pressable style={[activeStyles.actionBtn, activeStyles.cancelBtn]} onPress={onCancel}>
-            <Text style={[activeStyles.actionText, { color: DANGER }]}>✕ Cancel</Text>
+          ) : null}
+          <Pressable style={styles.cancelButton} onPress={onCancel}>
+            <Text style={[styles.actionText, { color: DANGER }]}>✕ Cancel</Text>
           </Pressable>
         </View>
       </View>
@@ -260,245 +251,76 @@ function ActiveDownloadCard({
   );
 }
 
-const activeStyles = StyleSheet.create({
-  card: {
-    flexDirection: 'row',
-    backgroundColor: CARD_BG,
-    borderRadius: 12,
-    padding: 12,
-    marginBottom: 8,
-    gap: 12,
-    alignItems: 'flex-start',
-  },
-  content: { flex: 1 },
-  title: { color: TEXT, fontSize: 13, fontWeight: '600', lineHeight: 18, marginBottom: 6 },
-  progressRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 },
-  track: { flex: 1, height: 4, backgroundColor: SURFACE, borderRadius: 2 },
-  fill: { height: 4, backgroundColor: ACCENT, borderRadius: 2 },
-  pctText: { color: ACCENT, fontSize: 11, fontWeight: '700', minWidth: 30 },
-  meta: { color: TEXT_MUTED, fontSize: 11, marginBottom: 8 },
-  actions: { flexDirection: 'row', gap: 8 },
-  actionBtn: {
-    paddingHorizontal: 12,
-    paddingVertical: 5,
-    borderRadius: 6,
-    backgroundColor: SURFACE,
-  },
-  cancelBtn: { backgroundColor: 'transparent' },
-  actionText: { color: TEXT, fontSize: 12, fontWeight: '600' },
-});
-
-// ─── OTT Content Card (for completed downloads) ─────────────────────────────────
-
-function ContentCard({
-  item,
-  onPress,
-  onMorePress,
-}: {
+function ContentCard({ item, onPress, onMorePress }: {
   item: EnrichedDownload;
   onPress: () => void;
   onMorePress: () => void;
 }) {
-  const title = item.title ?? item.id;
-  const hasProgress = (item.progress?.percentWatched ?? 0) > 1;
-  const pct = hasProgress ? Math.min(100, item.progress!.percentWatched) : 0;
-
+  const watched = Math.min(100, item.progress?.percentWatched ?? 0);
   return (
-    <Pressable
-      style={ccStyles.card}
-      onPress={onPress}
-      android_ripple={{ color: 'rgba(255,255,255,0.06)' }}
-    >
-      <View style={ccStyles.thumbWrap}>
+    <Pressable style={styles.contentCard} onPress={onPress}>
+      <View style={{ position: 'relative' }}>
         <Thumbnail size={110} url={item.thumbnailUrl} />
-        {/* watch progress stripe */}
-        {hasProgress && (
-          <View style={ccStyles.progressTrack}>
-            <View style={[ccStyles.progressFill, { width: `${pct}%` as any }]} />
+        {watched > 1 ? (
+          <View style={styles.watchTrack}>
+            <View style={[styles.watchFill, { width: `${watched}%` as any }]} />
           </View>
-        )}
-        {/* license badge */}
-        {item.licStatus === 'expiring' && (
-          <View style={[ccStyles.licBadge, { backgroundColor: WARN }]}>
-            <Text style={ccStyles.licBadgeText}>Expiring</Text>
-          </View>
-        )}
-        {item.licStatus === 'expired' && (
-          <View style={[ccStyles.licBadge, { backgroundColor: DANGER }]}>
-            <Text style={ccStyles.licBadgeText}>Expired</Text>
-          </View>
-        )}
-      </View>
-
-      <Text style={ccStyles.title} numberOfLines={2}>{title}</Text>
-
-      <View style={ccStyles.metaRow}>
-        {item.durationSeconds && item.durationSeconds > 0 ? (
-          <Text style={ccStyles.meta}>{fmtDuration(item.durationSeconds)}</Text>
-        ) : item.contentLength > 0 ? (
-          <Text style={ccStyles.meta}>{fmtBytes(item.contentLength)}</Text>
         ) : null}
-        {item.downloadedAt && (
-          <Text style={ccStyles.meta}>· {fmtDate(item.downloadedAt)}</Text>
-        )}
+        {item.accessStatus !== 'active' ? (
+          <View style={[
+            styles.accessBadge,
+            { backgroundColor: item.accessStatus === 'expired' ? DANGER : WARN },
+          ]}>
+            <Text style={styles.accessBadgeText}>
+              {item.accessStatus === 'expired' ? 'Access expired' : 'Expires soon'}
+            </Text>
+          </View>
+        ) : null}
       </View>
-
-      <Pressable style={ccStyles.moreBtn} onPress={onMorePress} hitSlop={8}>
-        <Text style={ccStyles.moreBtnText}>•••</Text>
+      <Text style={styles.compactTitle} numberOfLines={2}>{item.title ?? item.id}</Text>
+      <View style={styles.metaWrap}>
+        {item.durationSeconds ? <Text style={styles.smallMeta}>{fmtDuration(item.durationSeconds)}</Text> : null}
+        {item.entitlement?.accessExpiresAt ? (
+          <Text style={styles.smallMeta}>Access until {fmtDate(item.entitlement.accessExpiresAt)}</Text>
+        ) : item.downloadedAt ? (
+          <Text style={styles.smallMeta}>Downloaded {fmtDate(item.downloadedAt)}</Text>
+        ) : null}
+      </View>
+      <Pressable style={styles.moreButton} onPress={onMorePress} hitSlop={8}>
+        <Text style={styles.moreText}>•••</Text>
       </Pressable>
     </Pressable>
   );
 }
 
-const ccStyles = StyleSheet.create({
-  card: {
-    width: 150,
-    marginRight: 12,
-  },
-  thumbWrap: { position: 'relative' },
-  progressTrack: {
-    height: 3,
-    backgroundColor: 'rgba(255,255,255,0.12)',
-    borderRadius: 2,
-  },
-  progressFill: {
-    height: 3,
-    backgroundColor: ACCENT,
-    borderRadius: 2,
-  },
-  licBadge: {
-    position: 'absolute',
-    top: 6,
-    left: 6,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-  },
-  licBadgeText: { color: '#fff', fontSize: 9, fontWeight: '700' },
-  title: { color: TEXT, fontSize: 12, fontWeight: '600', marginTop: 6, lineHeight: 16 },
-  metaRow: { flexDirection: 'row', gap: 4, marginTop: 3, flexWrap: 'wrap' },
-  meta: { color: TEXT_MUTED, fontSize: 10 },
-  moreBtn: {
-    marginTop: 4,
-    alignSelf: 'flex-start',
-    paddingHorizontal: 4,
-    paddingVertical: 2,
-  },
-  moreBtnText: { color: TEXT_MUTED, fontSize: 14, letterSpacing: 1, fontWeight: '900' },
-});
-
-// ─── Section Header ─────────────────────────────────────────────────────────────
-
-function SectionHeader({ title, count }: { title: string; count: number }) {
-  return (
-    <View style={shStyles.row}>
-      <Text style={shStyles.title}>{title}</Text>
-      <Text style={shStyles.count}>{count} {count === 1 ? 'video' : 'videos'}</Text>
-    </View>
-  );
-}
-
-const shStyles = StyleSheet.create({
-  row: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingTop: 20, paddingBottom: 8 },
-  title: { color: TEXT, fontSize: 15, fontWeight: '700', flex: 1 },
-  count: { color: TEXT_MUTED, fontSize: 12 },
-});
-
-// ─── Module Sub-Header ──────────────────────────────────────────────────────────
-
-function ModuleHeader({ title, count }: { title: string; count: number }) {
-  return (
-    <View style={mhStyles.row}>
-      <View style={mhStyles.accent} />
-      <Text style={mhStyles.title} numberOfLines={1}>{title}</Text>
-      <Text style={mhStyles.count}>{count} {count === 1 ? 'video' : 'videos'}</Text>
-    </View>
-  );
-}
-
-const mhStyles = StyleSheet.create({
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingLeft: 20,
-    paddingRight: 16,
-    paddingTop: 10,
-    paddingBottom: 4,
-    gap: 8,
-  },
-  accent: {
-    width: 3,
-    height: 14,
-    borderRadius: 2,
-    backgroundColor: ACCENT,
-  },
-  title: { color: TEXT_MUTED, fontSize: 12, fontWeight: '600', flex: 1, letterSpacing: 0.2 },
-  count: { color: TEXT_MUTED, fontSize: 11 },
-});
-
-// ─── Empty State ────────────────────────────────────────────────────────────────
-
 function EmptyState() {
   return (
-    <View style={emptyStyles.box}>
-      <View style={emptyStyles.iconWrap}>
-        <Text style={emptyStyles.icon}>⬇</Text>
-      </View>
-      <Text style={emptyStyles.heading}>No Offline Videos Yet</Text>
-      <Text style={emptyStyles.sub}>
-        Open any lesson, tap the{' '}
-        <Text style={emptyStyles.subBold}>↓ Download</Text>
-        {' '}button, and it will appear here for offline viewing — no internet needed.
+    <View style={styles.empty}>
+      <View style={styles.emptyIconWrap}><Text style={styles.emptyIcon}>⬇</Text></View>
+      <Text style={styles.emptyTitle}>No Offline Videos Yet</Text>
+      <Text style={styles.emptyCopy}>
+        Open a lesson and tap Download. Your offline content, storage usage and access validity will appear here.
       </Text>
-      <View style={emptyStyles.hint}>
-        <Text style={emptyStyles.hintText}>📚  Go to Learn → open a course → tap Download</Text>
-      </View>
     </View>
   );
 }
 
-const emptyStyles = StyleSheet.create({
-  box: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 36 },
-  iconWrap: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    backgroundColor: 'rgba(79,195,247,0.12)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 20,
-  },
-  icon: { fontSize: 32 },
-  heading: { color: TEXT, fontSize: 22, fontWeight: '800', marginBottom: 12, letterSpacing: -0.3 },
-  sub: { color: TEXT_MUTED, fontSize: 14, textAlign: 'center', lineHeight: 22, marginBottom: 24 },
-  subBold: { color: ACCENT, fontWeight: '700' },
-  hint: {
-    backgroundColor: 'rgba(79,195,247,0.08)',
-    borderRadius: 10,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderWidth: 1,
-    borderColor: 'rgba(79,195,247,0.18)',
-  },
-  hintText: { color: TEXT_MUTED, fontSize: 13, lineHeight: 18 },
-});
-
-// ─── Manage Modal (bottom sheet) ────────────────────────────────────────────────
-
-interface ManageModalProps {
+function ManageModal({
+  item,
+  visible,
+  onClose,
+  onDismiss,
+  onDelete,
+  onPlay,
+}: {
   item: EnrichedDownload | null;
   visible: boolean;
   onClose: () => void;
   onDismiss: () => void;
   onDelete: (item: EnrichedDownload) => void;
-  onRenew: (item: EnrichedDownload) => void;
   onPlay: (item: EnrichedDownload) => void;
-}
-
-function ManageModal({ item, visible, onClose, onDismiss, onDelete, onRenew, onPlay }: ManageModalProps) {
+}) {
   if (!item) return null;
-  const title = item.title ?? item.id;
-
   return (
     <Modal
       visible={visible}
@@ -508,120 +330,40 @@ function ManageModal({ item, visible, onClose, onDismiss, onDelete, onRenew, onP
       onRequestClose={onClose}
       onDismiss={onDismiss}
     >
-      <Pressable style={mmStyles.overlay} onPress={onClose} />
-      <View style={mmStyles.sheet}>
-        <View style={mmStyles.handle} />
-
-        <Text style={mmStyles.title} numberOfLines={2}>{title}</Text>
-
-        {item.contentLength > 0 && (
-          <Text style={mmStyles.sub}>{fmtBytes(item.contentLength)} · Downloaded {fmtDate(item.downloadedAt)}</Text>
-        )}
-
-        <View style={mmStyles.divider} />
-
-        {item.licStatus !== 'expired' && (
-          <Pressable style={mmStyles.row} onPress={() => onPlay(item)}>
-            <Text style={mmStyles.rowIcon}>▶</Text>
-            <Text style={mmStyles.rowLabel}>Play Offline</Text>
+      <Pressable style={styles.modalOverlay} onPress={onClose} />
+      <View style={styles.modalSheet}>
+        <View style={styles.modalHandle} />
+        <Text style={styles.modalTitle} numberOfLines={2}>{item.title ?? item.id}</Text>
+        {item.entitlement?.accessExpiresAt ? (
+          <Text style={styles.modalSub}>Course access until {fmtDate(item.entitlement.accessExpiresAt)}</Text>
+        ) : item.contentLength > 0 ? (
+          <Text style={styles.modalSub}>{fmtBytes(item.contentLength)}</Text>
+        ) : null}
+        <View style={styles.modalDivider} />
+        {item.accessStatus !== 'expired' ? (
+          <Pressable style={styles.modalRow} onPress={() => onPlay(item)}>
+            <Text style={styles.modalIcon}>▶</Text>
+            <Text style={styles.modalLabel}>Play Offline</Text>
           </Pressable>
+        ) : (
+          <View style={styles.expiredMessage}>
+            <Text style={styles.expiredText}>This course access has expired. Offline playback is unavailable.</Text>
+          </View>
         )}
-
-        {(item.licStatus === 'expired' || item.licStatus === 'expiring') && (
-          <Pressable style={mmStyles.row} onPress={() => { onClose(); onRenew(item); }}>
-            <Text style={mmStyles.rowIcon}>↺</Text>
-            <Text style={[mmStyles.rowLabel, { color: item.licStatus === 'expired' ? DANGER : WARN }]}>
-              {item.licStatus === 'expired' ? 'License Expired — Renew' : 'Renew License (Expiring Soon)'}
-            </Text>
-          </Pressable>
-        )}
-
-        <Pressable style={mmStyles.row} onPress={() => { onClose(); onDelete(item); }}>
-          <Text style={[mmStyles.rowIcon, { color: DANGER }]}>🗑</Text>
-          <Text style={[mmStyles.rowLabel, { color: DANGER }]}>Delete Download</Text>
+        <Pressable style={styles.modalRow} onPress={() => { onClose(); onDelete(item); }}>
+          <Text style={[styles.modalIcon, { color: DANGER }]}>🗑</Text>
+          <Text style={[styles.modalLabel, { color: DANGER }]}>Delete Download</Text>
         </Pressable>
-
-        <Pressable style={mmStyles.cancelRow} onPress={onClose}>
-          <Text style={mmStyles.cancelText}>Cancel</Text>
+        <Pressable style={styles.modalCancel} onPress={onClose}>
+          <Text style={styles.modalCancelText}>Cancel</Text>
         </Pressable>
       </View>
     </Modal>
   );
 }
 
-const mmStyles = StyleSheet.create({
-  overlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-  },
-  sheet: {
-    backgroundColor: CARD_BG,
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    paddingTop: 12,
-    paddingBottom: Platform.OS === 'android' ? 24 : 36,
-    paddingHorizontal: 20,
-  },
-  handle: {
-    alignSelf: 'center',
-    width: 40,
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: SURFACE,
-    marginBottom: 16,
-  },
-  title: { color: TEXT, fontSize: 16, fontWeight: '700', marginBottom: 4 },
-  sub: { color: TEXT_MUTED, fontSize: 12, marginBottom: 12 },
-  divider: { height: 1, backgroundColor: SURFACE, marginBottom: 8 },
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 14,
-    gap: 16,
-  },
-  rowIcon: { fontSize: 18, width: 24, textAlign: 'center', color: TEXT },
-  rowLabel: { color: TEXT, fontSize: 15 },
-  cancelRow: { marginTop: 8, paddingVertical: 14, alignItems: 'center' },
-  cancelText: { color: TEXT_MUTED, fontSize: 15 },
-});
-
-// ─── Storage Bar ────────────────────────────────────────────────────────────────
-
-function StorageBar({ usedBytes, freeBytes, count }: { usedBytes: number; freeBytes: number; count: number }) {
-  const total = usedBytes + freeBytes;
-  const fillPct = total > 0 ? Math.min(100, (usedBytes / total) * 100) : 0;
-  const isLow = freeBytes > 0 && freeBytes < 2 * 1024 * 1024 * 1024;
-
-  return (
-    <View style={sbStyles.box}>
-      <View style={sbStyles.row}>
-        <Text style={sbStyles.label}>Storage</Text>
-        <Text style={sbStyles.right}>
-          {fmtBytes(usedBytes)} used · {count} {count === 1 ? 'video' : 'videos'}
-        </Text>
-      </View>
-      <View style={sbStyles.track}>
-        <View style={[sbStyles.fill, { width: `${fillPct}%` as any }, isLow && { backgroundColor: WARN }]} />
-      </View>
-      {isLow && <Text style={sbStyles.warn}>⚠ Less than 2 GB remaining</Text>}
-    </View>
-  );
-}
-
-const sbStyles = StyleSheet.create({
-  box: { marginHorizontal: 16, marginBottom: 4, marginTop: 8 },
-  row: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 },
-  label: { color: TEXT_MUTED, fontSize: 11, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.5 },
-  right: { color: TEXT_MUTED, fontSize: 11 },
-  track: { height: 4, backgroundColor: SURFACE, borderRadius: 2 },
-  fill: { height: 4, backgroundColor: ACCENT, borderRadius: 2 },
-  warn: { color: WARN, fontSize: 11, marginTop: 4 },
-});
-
-// ─── Main Screen ─────────────────────────────────────────────────────────────────
-
 type Section =
-  | { type: 'storage'; usedBytes: number; freeBytes: number; count: number }
+  | { type: 'storage' }
   | { type: 'continue'; items: EnrichedDownload[] }
   | { type: 'active'; items: EnrichedDownload[] }
   | { type: 'course'; courseName: string; modules: { moduleName: string; items: EnrichedDownload[] }[] }
@@ -631,8 +373,9 @@ export default function DownloadsScreen() {
   const router = useRouter();
   const [items, setItems] = useState<DownloadInfo[]>([]);
   const [progressMap, setProgressMap] = useState<Record<string, ChapterProgress>>({});
-  const [usedBytes, setUsedBytes] = useState(0);
-  const [freeBytes, setFreeBytes] = useState(0);
+  const [entitlementMap, setEntitlementMap] = useState<Record<string, DownloadEntitlement | null>>({});
+  const [offlineBytes, setOfflineBytes] = useState(0);
+  const [deviceStorage, setDeviceStorage] = useState<DeviceStorageStats>(ZERO_DEVICE_STORAGE);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [modalItem, setModalItem] = useState<EnrichedDownload | null>(null);
@@ -641,187 +384,156 @@ export default function DownloadsScreen() {
   const [resolvedHierarchy, setResolvedHierarchy] = useState<Record<string, { courseName: string; moduleName: string }>>({});
   const resolvedHierarchyRef = useRef<Record<string, { courseName: string; moduleName: string }>>({});
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  // pendingNavId: set before closing modal, consumed in onModalDismiss to
-  // navigate AFTER the modal is fully gone (avoids NavigationContainer crash on Android).
   const pendingNavId = useRef<string | null>(null);
 
-  // ── Load ──
+  const refreshStorage = useCallback(async () => {
+    const [offline, device] = await Promise.all([
+      IcareOfflineDrm.getStorageStats().catch(() => ({ usedBytes: 0, downloadCount: 0 })),
+      IcareOfflineDrm.getDeviceStorageStats().catch(() => ZERO_DEVICE_STORAGE),
+    ]);
+    setOfflineBytes(offline.usedBytes);
+    setDeviceStorage(device);
+  }, []);
 
   const load = useCallback(async () => {
     try {
-      const [list, allProg] = await Promise.all([
+      const [list, allProgress] = await Promise.all([
         IcareOfflineDrm.listDownloads(),
         getAllProgress(),
       ]);
       setItems(list);
-      const pm: Record<string, ChapterProgress> = {};
-      for (const p of allProg) pm[p.chapterId] = p;
-      setProgressMap(pm);
 
-      try {
-        const stats = await IcareOfflineDrm.getStorageStats();
-        setUsedBytes(stats.usedBytes);
-      } catch { /**/ }
-      try {
-        const f = await FileSystem.getFreeDiskStorageAsync();
-        setFreeBytes(typeof f === 'number' ? f : 0);
-      } catch { /**/ }
+      const progress: Record<string, ChapterProgress> = {};
+      for (const entry of allProgress) progress[entry.chapterId] = entry;
+      setProgressMap(progress);
+
+      const entitlementEntries = await Promise.all(
+        list.map(async (item) => [
+          item.id,
+          await IcareOfflineDrm.getDownloadEntitlement(item.id).catch(() => null),
+        ] as const),
+      );
+      setEntitlementMap(Object.fromEntries(entitlementEntries));
+      await refreshStorage();
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [refreshStorage]);
 
   useEffect(() => { load(); }, [load]);
-
-  // ── Live events ──
 
   useEffect(() => {
     const sub = onDownloadProgress((evt) => {
       setItems((prev) => {
-        const idx = prev.findIndex((d) => d.id === evt.id);
-        if (idx === -1) return [evt, ...prev];
+        const idx = prev.findIndex((item) => item.id === evt.id);
+        if (idx < 0) return [evt, ...prev];
         const next = [...prev];
         next[idx] = evt;
         return next;
       });
-      if (evt.state === 'completed') {
-        IcareOfflineDrm.getStorageStats()
-          .then((s) => setUsedBytes(s.usedBytes))
-          .catch(() => {});
-      }
+      if (evt.state === 'completed') refreshStorage().catch(() => {});
     });
     return () => sub.remove();
-  }, []);
-
-  // ── Fallback poll when active downloads exist ──
+  }, [refreshStorage]);
 
   useEffect(() => {
-    const hasActive = items.some(
-      (d) => d.state === 'downloading' || d.state === 'queued' || d.state === 'restarting'
+    const hasActive = items.some((item) =>
+      item.state === 'downloading' || item.state === 'queued' || item.state === 'restarting',
     );
     if (hasActive && !pollRef.current) {
       pollRef.current = setInterval(async () => {
         const updated = await IcareOfflineDrm.listDownloads();
-        setItems((prev) => {
-          let changed = false;
-          const next = prev.map((p) => {
-            const u = updated.find((d) => d.id === p.id);
-            if (!u) return p;
-            if (u.bytesDownloaded !== p.bytesDownloaded || u.state !== p.state) {
-              changed = true; return u;
-            }
-            return p;
-          });
-          return changed ? next : prev;
-        });
-        const stillActive = updated.some(
-          (d) => d.state === 'downloading' || d.state === 'queued' || d.state === 'restarting'
+        // Authoritative reconciliation: items removed from Media3 must disappear
+        // from React state instead of being retained by the old merge algorithm.
+        setItems(updated);
+        const stillActive = updated.some((item) =>
+          item.state === 'downloading' || item.state === 'queued' || item.state === 'restarting',
         );
         if (!stillActive && pollRef.current) {
           clearInterval(pollRef.current);
           pollRef.current = null;
-          IcareOfflineDrm.getStorageStats().then((s) => setUsedBytes(s.usedBytes)).catch(() => {});
+          refreshStorage().catch(() => {});
         }
-      }, 3000);
+      }, 2500);
     }
     if (!hasActive && pollRef.current) {
       clearInterval(pollRef.current);
       pollRef.current = null;
     }
     return () => {
-      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
     };
-  }, [items.length]);
+  }, [items, refreshStorage]);
 
-  // ── Resolve missing/raw-ID titles from Base44 API ──
-
-  // Stable key: sorted IDs that still need a real title fetched.
-  // Changes only when the set of unresolved IDs changes — NOT on every poll tick.
-  const needsResolutionKey = useMemo(
-    () =>
-      items
-        .filter((d) => !resolvedTitlesRef.current[d.id] && (!d.title || isRawId(d.title)))
-        .map((d) => d.id)
-        .sort()
-        .join(','),
-    [items]
-  );
+  const needsResolutionKey = useMemo(() =>
+    items
+      .filter((item) => !resolvedTitlesRef.current[item.id] && (!item.title || isRawId(item.title)))
+      .map((item) => item.id)
+      .sort()
+      .join(','),
+  [items]);
 
   useEffect(() => {
-    if (!needsResolutionKey) return; // nothing to resolve
+    if (!needsResolutionKey) return;
     let cancelled = false;
     (async () => {
-      const toResolve = needsResolutionKey.split(',').filter(Boolean);
       const updates: Record<string, string> = {};
-      for (const id of toResolve) {
-        if (resolvedTitlesRef.current[id]) continue; // already resolved
+      for (const id of needsResolutionKey.split(',').filter(Boolean)) {
         try {
           const { data } = await fetchChapter(id);
           if (data?.title) updates[id] = data.title;
-        } catch { /* silently ignore — will show id as fallback */ }
+        } catch { /* keep fallback */ }
       }
-      if (!cancelled && Object.keys(updates).length > 0) {
+      if (!cancelled && Object.keys(updates).length) {
         resolvedTitlesRef.current = { ...resolvedTitlesRef.current, ...updates };
-        setResolvedTitles(resolvedTitlesRef.current);
+        setResolvedTitles({ ...resolvedTitlesRef.current });
       }
     })();
     return () => { cancelled = true; };
   }, [needsResolutionKey]);
 
-  // ── Resolve Course → Module hierarchy for each completed download ──
-
-  // Only completed downloads need hierarchy; active/queued don't show in grouped view.
-  const needsHierarchyKey = useMemo(
-    () =>
-      items
-        .filter((d) => d.state === 'completed' && !resolvedHierarchyRef.current[d.id])
-        .map((d) => d.id)
-        .sort()
-        .join(','),
-    [items]
-  );
+  const needsHierarchyKey = useMemo(() =>
+    items
+      .filter((item) => item.state === 'completed' && !resolvedHierarchyRef.current[item.id])
+      .map((item) => item.id)
+      .sort()
+      .join(','),
+  [items]);
 
   useEffect(() => {
     if (!needsHierarchyKey) return;
     let cancelled = false;
     (async () => {
-      const toResolve = needsHierarchyKey.split(',').filter(Boolean);
-      // Deduplicate course/module fetches within this batch
-      const courseNameCache: Record<string, string> = {};
-      const moduleNameCache: Record<string, string> = {};
+      const courseCache: Record<string, string> = {};
+      const moduleCache: Record<string, string> = {};
       const updates: Record<string, { courseName: string; moduleName: string }> = {};
-
-      for (const id of toResolve) {
-        if (resolvedHierarchyRef.current[id]) continue;
+      for (const id of needsHierarchyKey.split(',').filter(Boolean)) {
         try {
-          const { data: ch } = await fetchChapter(id);
-          const cid = ch?.courseId;
-          const mid = ch?.moduleId;
-          if (!cid || !mid) continue;
-
-          if (!(cid in courseNameCache)) {
+          const { data: chapter } = await fetchChapter(id);
+          if (!chapter?.courseId || !chapter?.moduleId) continue;
+          if (!(chapter.courseId in courseCache)) {
             try {
-              const { data: course } = await fetchCourse(cid);
-              courseNameCache[cid] = course?.title ?? '';
-            } catch { courseNameCache[cid] = ''; }
+              const { data } = await fetchCourse(chapter.courseId);
+              courseCache[chapter.courseId] = data?.title ?? '';
+            } catch { courseCache[chapter.courseId] = ''; }
           }
-
-          if (!(mid in moduleNameCache)) {
+          if (!(chapter.moduleId in moduleCache)) {
             try {
-              const { data: mod } = await fetchModule(mid);
-              moduleNameCache[mid] = mod?.title ?? '';
-            } catch { moduleNameCache[mid] = ''; }
+              const { data } = await fetchModule(chapter.moduleId);
+              moduleCache[chapter.moduleId] = data?.title ?? '';
+            } catch { moduleCache[chapter.moduleId] = ''; }
           }
-
           updates[id] = {
-            courseName: courseNameCache[cid] || '',
-            moduleName: moduleNameCache[mid] || '',
+            courseName: courseCache[chapter.courseId] || '',
+            moduleName: moduleCache[chapter.moduleId] || '',
           };
-        } catch { /* silently ignore — fallback to title-derived grouping */ }
+        } catch { /* fallback grouping */ }
       }
-
-      if (!cancelled && Object.keys(updates).length > 0) {
+      if (!cancelled && Object.keys(updates).length) {
         resolvedHierarchyRef.current = { ...resolvedHierarchyRef.current, ...updates };
         setResolvedHierarchy({ ...resolvedHierarchyRef.current });
       }
@@ -829,25 +541,9 @@ export default function DownloadsScreen() {
     return () => { cancelled = true; };
   }, [needsHierarchyKey]);
 
-  // ── Actions ──
-
   const navigateToPlayer = useCallback((id: string) => {
-    router.push({
-      pathname: '/player/[chapterId]',
-      params: { chapterId: id },
-    } as unknown as Href);
+    router.push({ pathname: '/player/[chapterId]', params: { chapterId: id } } as unknown as Href);
   }, [router]);
-
-  // Called directly (no modal involved) — safe to navigate immediately.
-  const playChapter = useCallback((id: string) => {
-    navigateToPlayer(id);
-  }, [navigateToPlayer]);
-
-  // Called from inside ManageModal — close modal first, navigate after dismiss.
-  const playChapterFromModal = useCallback((id: string) => {
-    pendingNavId.current = id;
-    setModalItem(null);
-  }, []);
 
   const onModalDismiss = useCallback(() => {
     const id = pendingNavId.current;
@@ -865,138 +561,104 @@ export default function DownloadsScreen() {
           text: 'Delete',
           style: 'destructive',
           onPress: async () => {
-            await IcareOfflineDrm.removeDownload(item.id);
-            setItems((prev) => prev.filter((d) => d.id !== item.id));
-            IcareOfflineDrm.getStorageStats().then((s) => setUsedBytes(s.usedBytes)).catch(() => {});
+            try {
+              await IcareOfflineDrm.removeDownload(item.id);
+              setItems((prev) => prev.filter((entry) => entry.id !== item.id));
+              setEntitlementMap((prev) => {
+                const next = { ...prev };
+                delete next[item.id];
+                return next;
+              });
+              await refreshStorage();
+            } catch (error: any) {
+              Alert.alert('Could not delete download', error?.message ?? String(error));
+              load().catch(() => {});
+            }
           },
         },
-      ]
+      ],
     );
-  }, []);
+  }, [load, refreshStorage]);
 
-  const handleRenew = useCallback((item: EnrichedDownload) => {
-    Alert.alert(
-      'Renew License',
-      'Open this chapter online to renew the offline license. An internet connection is required.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Open Chapter',
-          onPress: () => navigateToPlayer(item.id),
-        },
-      ]
-    );
-  }, [navigateToPlayer]);
+  const enriched = useMemo<EnrichedDownload[]>(() =>
+    items.map((item) => {
+      const entitlement = entitlementMap[item.id] ?? null;
+      return {
+        ...item,
+        title: resolvedTitles[item.id] ?? (isRawId(item.title) ? null : item.title) ?? null,
+        progress: progressMap[item.id] ?? null,
+        entitlement,
+        accessStatus: accessState(entitlement?.accessExpiresAt),
+        courseName: resolvedHierarchy[item.id]?.courseName ?? null,
+        moduleName: resolvedHierarchy[item.id]?.moduleName ?? null,
+      };
+    }),
+  [items, entitlementMap, resolvedTitles, progressMap, resolvedHierarchy]);
 
-  // ── Enrich ──
+  const sections = useMemo<Section[]>(() => {
+    if (!enriched.length) return [{ type: 'storage' }, { type: 'empty' }];
+    const completed = enriched.filter((item) => item.state === 'completed');
+    const active = enriched.filter((item) => item.state !== 'completed' && item.state !== 'removing');
+    const result: Section[] = [{ type: 'storage' }];
 
-  const enriched: EnrichedDownload[] = useMemo(
-    () =>
-      items.map((d) => ({
-        ...d,
-        // Prefer API-resolved title > stored title (only if it's not a raw ObjectId) > null
-        title: resolvedTitles[d.id] ?? (isRawId(d.title) ? null : d.title) ?? null,
-        progress: progressMap[d.id] ?? null,
-        licStatus: licenseAge(d.downloadedAt),
-        courseName: resolvedHierarchy[d.id]?.courseName ?? null,
-        moduleName: resolvedHierarchy[d.id]?.moduleName ?? null,
-      })),
-    [items, progressMap, resolvedTitles, resolvedHierarchy]
-  );
-
-  // ── Build sections ──
-
-  const sections: Section[] = useMemo(() => {
-    const completed = enriched.filter((d) => d.state === 'completed');
-    const active = enriched.filter((d) => d.state !== 'completed');
-
-    if (enriched.length === 0) return [{ type: 'empty' }];
-
-    const result: Section[] = [];
-
-    result.push({ type: 'storage', usedBytes, freeBytes, count: completed.length });
-
-    // Continue Watching — completed chapters with >1% progress, sorted by last watched
     const continueItems = completed
-      .filter((d) => (d.progress?.percentWatched ?? 0) > 1 && (d.progress?.percentWatched ?? 0) < 95)
-      .sort((a, b) => {
-        const ta = a.progress?.lastWatchedAt ?? '';
-        const tb = b.progress?.lastWatchedAt ?? '';
-        return tb.localeCompare(ta);
+      .filter((item) => {
+        const pct = item.progress?.percentWatched ?? 0;
+        return item.accessStatus !== 'expired' && pct > 1 && pct < 95;
       })
+      .sort((a, b) => (b.progress?.lastWatchedAt ?? '').localeCompare(a.progress?.lastWatchedAt ?? ''))
       .slice(0, 10);
+    if (continueItems.length) result.push({ type: 'continue', items: continueItems });
+    if (active.length) result.push({ type: 'active', items: active });
 
-    if (continueItems.length > 0) {
-      result.push({ type: 'continue', items: continueItems });
+    const courseMap = new Map<string, Map<string, EnrichedDownload[]>>();
+    for (const item of completed) {
+      const courseName = item.courseName || courseKey(item.title);
+      const moduleName = item.moduleName || '';
+      if (!courseMap.has(courseName)) courseMap.set(courseName, new Map());
+      const moduleMap = courseMap.get(courseName)!;
+      const arr = moduleMap.get(moduleName) ?? [];
+      arr.push(item);
+      moduleMap.set(moduleName, arr);
     }
-
-    // Active downloads
-    if (active.length > 0) {
-      result.push({ type: 'active', items: active });
+    for (const [courseName, moduleMap] of courseMap) {
+      result.push({
+        type: 'course',
+        courseName,
+        modules: Array.from(moduleMap.entries()).map(([moduleName, moduleItems]) => ({
+          moduleName,
+          items: moduleItems,
+        })),
+      });
     }
-
-    // Completed — grouped by Course → Module.
-    // Falls back to title-derived course key while hierarchy is still loading.
-    const courseMap = new Map<string, { courseName: string; moduleMap: Map<string, EnrichedDownload[]> }>();
-    for (const d of completed) {
-      const cName = (d.courseName && d.courseName.length > 0) ? d.courseName : courseKey(d.title);
-      const mName = d.moduleName ?? '';
-      if (!courseMap.has(cName)) {
-        courseMap.set(cName, { courseName: cName, moduleMap: new Map() });
-      }
-      const cEntry = courseMap.get(cName)!;
-      const arr = cEntry.moduleMap.get(mName) ?? [];
-      arr.push(d);
-      cEntry.moduleMap.set(mName, arr);
-    }
-    for (const [, cEntry] of courseMap.entries()) {
-      const modules = Array.from(cEntry.moduleMap.entries()).map(([mName, mItems]) => ({
-        moduleName: mName,
-        items: mItems,
-      }));
-      result.push({ type: 'course', courseName: cEntry.courseName, modules });
-    }
-
     return result;
-  }, [enriched, usedBytes, freeBytes]);
+  }, [enriched]);
 
-  // ── Render section ──
-
-  const renderSection = useCallback((section: Section, index: number) => {
+  const renderSection = useCallback((section: Section) => {
     switch (section.type) {
       case 'storage':
         return (
-          <StorageBar
+          <StorageSummary
             key="storage"
-            usedBytes={section.usedBytes}
-            freeBytes={section.freeBytes}
-            count={section.count}
+            device={deviceStorage}
+            offlineBytes={offlineBytes}
+            count={enriched.filter((item) => item.state === 'completed').length}
           />
         );
-
       case 'continue':
         return (
           <View key="continue">
             <SectionHeader title="Continue Watching" count={section.items.length} />
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 8 }}
-            >
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.horizontalContent}>
               {section.items.map((item) => (
-                <ContinueWatchingCard
-                  key={item.id}
-                  item={item}
-                  onPress={() => playChapter(item.id)}
-                />
+                <ContinueWatchingCard key={item.id} item={item} onPress={() => navigateToPlayer(item.id)} />
               ))}
             </ScrollView>
           </View>
         );
-
       case 'active':
         return (
-          <View key="active" style={{ paddingHorizontal: 16 }}>
+          <View key="active" style={styles.activeSection}>
             <SectionHeader title="Downloading" count={section.items.length} />
             {section.items.map((item) => (
               <ActiveDownloadCard
@@ -1009,35 +671,21 @@ export default function DownloadsScreen() {
             ))}
           </View>
         );
-
       case 'course': {
-        const displayName =
-          section.courseName === '__ungrouped__' ? 'Downloaded Videos' : section.courseName;
-        const totalCount = section.modules.reduce((sum, m) => sum + m.items.length, 0);
+        const title = section.courseName === '__ungrouped__' ? 'Downloaded Videos' : section.courseName;
+        const count = section.modules.reduce((sum, module) => sum + module.items.length, 0);
         return (
           <View key={`course-${section.courseName}`}>
-            <SectionHeader title={displayName} count={totalCount} />
-            {section.modules.map((mod) => (
-              <View key={`mod-${mod.moduleName || '_default'}`}>
-                {mod.moduleName ? (
-                  <ModuleHeader title={mod.moduleName} count={mod.items.length} />
-                ) : null}
-                <ScrollView
-                  horizontal
-                  showsHorizontalScrollIndicator={false}
-                  contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 12 }}
-                >
-                  {mod.items.map((item) => (
+            <SectionHeader title={title} count={count} />
+            {section.modules.map((module) => (
+              <View key={`${section.courseName}-${module.moduleName || '_default'}`}>
+                {module.moduleName ? <ModuleHeader title={module.moduleName} count={module.items.length} /> : null}
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.horizontalContent}>
+                  {module.items.map((item) => (
                     <ContentCard
                       key={item.id}
                       item={item}
-                      onPress={() => {
-                        if (item.licStatus === 'expired') {
-                          setModalItem(item);
-                        } else {
-                          playChapter(item.id);
-                        }
-                      }}
+                      onPress={() => item.accessStatus === 'expired' ? setModalItem(item) : navigateToPlayer(item.id)}
                       onMorePress={() => setModalItem(item)}
                     />
                   ))}
@@ -1047,45 +695,40 @@ export default function DownloadsScreen() {
           </View>
         );
       }
-
       case 'empty':
         return <EmptyState key="empty" />;
-
       default:
         return null;
     }
-  }, [playChapter, handleDelete]);
-
-  // ── Loading ──
+  }, [deviceStorage, enriched, handleDelete, navigateToPlayer, offlineBytes]);
 
   if (loading) {
     return (
-      <View style={screenStyles.loadingBox}>
+      <View style={styles.loading}>
         <ActivityIndicator size="large" color={ACCENT} />
       </View>
     );
   }
 
   return (
-    <View style={screenStyles.screen}>
-      {/* Header */}
-      <View style={screenStyles.header}>
+    <View style={styles.screen}>
+      <View style={styles.header}>
         <Pressable
-          style={screenStyles.backBtn}
+          style={styles.backButton}
           onPress={() => router.navigate('/(tabs)/explore' as any)}
-          android_ripple={{ color: 'rgba(255,255,255,0.08)', borderless: true, radius: 22 }}
-          hitSlop={12}
           accessibilityLabel="Back to Learn"
         >
-          <Text style={screenStyles.backIcon}>←</Text>
+          <Text style={styles.backIcon}>←</Text>
         </Pressable>
-        <Text style={screenStyles.headerTitle}>My Downloads</Text>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.headerTitle}>My Downloads</Text>
+          <Text style={styles.headerSub}>Offline Learning Manager</Text>
+        </View>
       </View>
 
-      {/* Sections */}
       <ScrollView
-        style={screenStyles.scroll}
-        contentContainerStyle={enriched.length === 0 ? screenStyles.scrollEmpty : screenStyles.scrollContent}
+        style={{ flex: 1 }}
+        contentContainerStyle={enriched.length ? styles.scrollContent : styles.scrollEmpty}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
@@ -1095,49 +738,123 @@ export default function DownloadsScreen() {
           />
         }
       >
-        {sections.map((s, i) => renderSection(s, i))}
-        <View style={{ height: 24 }} />
+        {sections.map(renderSection)}
+        <View style={{ height: 28 }} />
       </ScrollView>
 
-      {/* Manage modal — navigation happens in onDismiss, after modal is fully gone */}
       <ManageModal
         item={modalItem}
         visible={modalItem !== null}
         onClose={() => setModalItem(null)}
         onDismiss={onModalDismiss}
         onDelete={(item) => { setModalItem(null); handleDelete(item); }}
-        onRenew={(item) => { setModalItem(null); handleRenew(item); }}
-        onPlay={(item) => playChapterFromModal(item.id)}
+        onPlay={(item) => {
+          pendingNavId.current = item.id;
+          setModalItem(null);
+        }}
       />
     </View>
   );
 }
 
-const screenStyles = StyleSheet.create({
-  // 80 px top padding clears the camera punch-hole / tall status bar area
+const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: BG, paddingTop: 80 },
-  loadingBox: { flex: 1, backgroundColor: BG, alignItems: 'center', justifyContent: 'center', paddingTop: 80 },
+  loading: { flex: 1, backgroundColor: BG, alignItems: 'center', justifyContent: 'center' },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
-    paddingBottom: 14,
+    gap: 12,
     paddingHorizontal: 16,
-    backgroundColor: BG,
+    paddingBottom: 14,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: 'rgba(255,255,255,0.06)',
   },
-  backBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+  backButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
     backgroundColor: 'rgba(255,255,255,0.07)',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  backIcon: { color: TEXT, fontSize: 18, lineHeight: 22 },
-  headerTitle: { color: TEXT, fontSize: 24, fontWeight: '800', letterSpacing: -0.4, flex: 1 },
-  scroll: { flex: 1 },
+  backIcon: { color: TEXT, fontSize: 20 },
+  headerTitle: { color: TEXT, fontSize: 23, fontWeight: '800', letterSpacing: -0.4 },
+  headerSub: { color: TEXT_MUTED, fontSize: 11, marginTop: 2 },
   scrollContent: { paddingBottom: 40 },
-  scrollEmpty: { flex: 1 },
+  scrollEmpty: { flexGrow: 1, paddingBottom: 40 },
+
+  eyebrow: { color: TEXT_MUTED, fontSize: 10, fontWeight: '700', letterSpacing: 0.8 },
+  storageCard: {
+    marginHorizontal: 16,
+    marginTop: 16,
+    padding: 16,
+    backgroundColor: CARD_BG,
+    borderRadius: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.08)',
+  },
+  storageTopRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' },
+  storageHeadline: { color: TEXT, fontSize: 20, fontWeight: '800', marginTop: 4 },
+  storageTotal: { color: TEXT_MUTED, fontSize: 11, marginTop: 2 },
+  storageTrack: { height: 7, backgroundColor: SURFACE, borderRadius: 4, overflow: 'hidden', marginTop: 14 },
+  storageFill: { height: 7, backgroundColor: ACCENT, borderRadius: 4 },
+  storageMetaRow: { flexDirection: 'row', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, marginTop: 10 },
+  storageMeta: { color: TEXT_MUTED, fontSize: 11 },
+  storageWarning: { color: WARN, fontSize: 11, marginTop: 8, lineHeight: 16 },
+
+  sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingTop: 20, paddingBottom: 8 },
+  sectionTitle: { color: TEXT, fontSize: 15, fontWeight: '700', flex: 1 },
+  sectionCount: { color: TEXT_MUTED, fontSize: 11 },
+  moduleHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 20, paddingTop: 8, paddingBottom: 4 },
+  moduleAccent: { width: 3, height: 14, borderRadius: 2, backgroundColor: ACCENT },
+  moduleTitle: { color: TEXT_MUTED, fontSize: 12, fontWeight: '600', flex: 1 },
+  horizontalContent: { paddingHorizontal: 16, paddingBottom: 12 },
+
+  thumb: { backgroundColor: SURFACE, borderRadius: 8, overflow: 'hidden', alignItems: 'center', justifyContent: 'center' },
+  thumbIcon: { fontSize: 28 },
+  playBadge: { position: 'absolute', right: 6, bottom: 6, width: 24, height: 24, borderRadius: 12, backgroundColor: ACCENT, alignItems: 'center', justifyContent: 'center' },
+  playBadgeText: { color: '#000', fontSize: 10, fontWeight: '900' },
+  continueCard: { width: 160, marginRight: 12 },
+  contentCard: { width: 150, marginRight: 12 },
+  compactTitle: { color: TEXT, fontSize: 12, fontWeight: '600', lineHeight: 16, marginTop: 6 },
+  smallMeta: { color: TEXT_MUTED, fontSize: 10, marginTop: 3 },
+  metaWrap: { gap: 1 },
+  watchTrack: { height: 3, backgroundColor: 'rgba(255,255,255,0.12)' },
+  watchFill: { height: 3, backgroundColor: ACCENT },
+  accessBadge: { position: 'absolute', top: 6, left: 6, borderRadius: 4, paddingHorizontal: 6, paddingVertical: 3 },
+  accessBadgeText: { color: '#fff', fontSize: 9, fontWeight: '700' },
+  moreButton: { alignSelf: 'flex-start', paddingHorizontal: 4, paddingVertical: 4 },
+  moreText: { color: TEXT_MUTED, fontSize: 14, fontWeight: '900', letterSpacing: 1 },
+
+  activeSection: { paddingHorizontal: 16 },
+  activeCard: { flexDirection: 'row', gap: 12, padding: 12, backgroundColor: CARD_BG, borderRadius: 12, marginBottom: 8 },
+  activeTitle: { color: TEXT, fontSize: 13, fontWeight: '600', lineHeight: 18 },
+  progressRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 8 },
+  downloadTrack: { flex: 1, height: 5, backgroundColor: SURFACE, borderRadius: 3, overflow: 'hidden' },
+  downloadFill: { height: 5, backgroundColor: ACCENT },
+  progressPct: { color: ACCENT, fontSize: 11, fontWeight: '700', minWidth: 32 },
+  actionRow: { flexDirection: 'row', gap: 8, marginTop: 8 },
+  actionButton: { backgroundColor: SURFACE, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6 },
+  cancelButton: { paddingHorizontal: 10, paddingVertical: 6 },
+  actionText: { color: TEXT, fontSize: 11, fontWeight: '600' },
+
+  empty: { flex: 1, minHeight: 380, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 36 },
+  emptyIconWrap: { width: 72, height: 72, borderRadius: 36, backgroundColor: 'rgba(79,195,247,0.12)', alignItems: 'center', justifyContent: 'center' },
+  emptyIcon: { fontSize: 32 },
+  emptyTitle: { color: TEXT, fontSize: 21, fontWeight: '800', marginTop: 18 },
+  emptyCopy: { color: TEXT_MUTED, fontSize: 14, textAlign: 'center', lineHeight: 21, marginTop: 10 },
+
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.62)' },
+  modalSheet: { backgroundColor: CARD_BG, borderTopLeftRadius: 20, borderTopRightRadius: 20, paddingHorizontal: 20, paddingTop: 12, paddingBottom: Platform.OS === 'android' ? 24 : 36 },
+  modalHandle: { width: 40, height: 4, borderRadius: 2, backgroundColor: SURFACE, alignSelf: 'center', marginBottom: 16 },
+  modalTitle: { color: TEXT, fontSize: 16, fontWeight: '700' },
+  modalSub: { color: TEXT_MUTED, fontSize: 12, marginTop: 4 },
+  modalDivider: { height: StyleSheet.hairlineWidth, backgroundColor: SURFACE, marginVertical: 12 },
+  modalRow: { flexDirection: 'row', alignItems: 'center', gap: 14, paddingVertical: 14 },
+  modalIcon: { color: TEXT, fontSize: 18, width: 24, textAlign: 'center' },
+  modalLabel: { color: TEXT, fontSize: 15 },
+  modalCancel: { paddingVertical: 14, alignItems: 'center' },
+  modalCancelText: { color: TEXT_MUTED, fontSize: 15 },
+  expiredMessage: { paddingVertical: 12, paddingHorizontal: 12, backgroundColor: 'rgba(239,83,80,0.10)', borderRadius: 8 },
+  expiredText: { color: DANGER, fontSize: 12, lineHeight: 18 },
 });
