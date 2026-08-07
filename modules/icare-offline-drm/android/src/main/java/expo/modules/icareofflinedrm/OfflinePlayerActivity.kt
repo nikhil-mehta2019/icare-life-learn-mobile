@@ -1,9 +1,11 @@
 package expo.modules.icareofflinedrm
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.os.Bundle
 import android.util.Base64
 import android.util.Log
+import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
@@ -22,23 +24,11 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.drm.DefaultDrmSessionManager
 import androidx.media3.exoplayer.drm.DrmSessionManagerProvider
 import androidx.media3.exoplayer.drm.FrameworkMediaDrm
-import androidx.media3.exoplayer.drm.LocalMediaDrmCallback
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.ui.PlayerView
 
 private const val TAG = "OfflinePlayerActivity"
 
-/**
- * Full-screen offline DRM player Activity.
- *
- * Launched by IcareOfflineDrmModule.launchOfflinePlayer(id).
- * Uses the persisted Widevine keySetId for offline DRM playback via
- * DefaultDrmSessionManager.Builder().setKeySetId() — the official
- * Media3 offline license restore path.
- *
- * Data source: CacheDataSource.Factory wrapping DownloadUtil.getDownloadCache()
- * so all segment reads come from the local cache, zero network calls needed.
- */
 @UnstableApi
 class OfflinePlayerActivity : Activity() {
 
@@ -47,13 +37,22 @@ class OfflinePlayerActivity : Activity() {
         const val EXTRA_TITLE       = "chapter_title"
     }
 
+    private data class AudioChoice(
+        val key: String,
+        val label: String,
+        val group: androidx.media3.common.TrackGroup,
+        val trackIndex: Int,
+        val bitrate: Int,
+    )
+
     private var player: ExoPlayer? = null
     private var playerView: PlayerView? = null
+    private var audioButton: TextView? = null
+    private var audioChoices: List<AudioChoice> = emptyList()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Keep screen on, full-screen immersive
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         window.decorView.systemUiVisibility = (
             View.SYSTEM_UI_FLAG_FULLSCREEN or
@@ -68,7 +67,6 @@ class OfflinePlayerActivity : Activity() {
         }
         val title = intent.getStringExtra(EXTRA_TITLE) ?: downloadId
 
-        // ── Layout (pure code, no XML resource needed) ──────────────────────
         val root = FrameLayout(this)
         root.setBackgroundColor(0xFF000000.toInt())
 
@@ -82,7 +80,10 @@ class OfflinePlayerActivity : Activity() {
         playerView = pv
         root.addView(pv)
 
-        // Title overlay at top-left (visible while controls are shown)
+        pv.post {
+            pv.findViewById<View>(androidx.media3.ui.R.id.exo_settings)?.visibility = View.GONE
+        }
+
         val titleView = TextView(this)
         titleView.text = title
         titleView.setTextColor(0xFFFFFFFF.toInt())
@@ -94,29 +95,42 @@ class OfflinePlayerActivity : Activity() {
         )
         root.addView(titleView)
 
-        // Close button (top-right)
         val closeBtn = ImageButton(this)
         closeBtn.setImageResource(android.R.drawable.ic_menu_close_clear_cancel)
         closeBtn.setBackgroundColor(0x66000000.toInt())
         val closeLp = FrameLayout.LayoutParams(96, 96)
-        closeLp.gravity = android.view.Gravity.TOP or android.view.Gravity.END
+        closeLp.gravity = Gravity.TOP or Gravity.END
         closeLp.topMargin = 24
         closeLp.rightMargin = 24
         closeBtn.layoutParams = closeLp
         closeBtn.setOnClickListener { finish() }
         root.addView(closeBtn)
 
+        val audioBtn = TextView(this)
+        audioBtn.text = "Audio"
+        audioBtn.setTextColor(0xFFFFFFFF.toInt())
+        audioBtn.textSize = 14f
+        audioBtn.gravity = Gravity.CENTER
+        audioBtn.setPadding(24, 0, 24, 0)
+        audioBtn.setBackgroundColor(0x66000000.toInt())
+        audioBtn.visibility = View.GONE
+        val audioLp = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, 80)
+        audioLp.gravity = Gravity.TOP or Gravity.END
+        audioLp.topMargin = 32
+        audioLp.rightMargin = 140
+        audioBtn.layoutParams = audioLp
+        audioBtn.setOnClickListener { showAudioChooser() }
+        audioButton = audioBtn
+        root.addView(audioBtn)
+
         setContentView(root)
 
-        // ── Resolve the download from DownloadManager ────────────────────────
         val download = try {
-            DownloadUtil.getDownloadManager(applicationContext)
-                .downloadIndex.getDownload(downloadId)
+            DownloadUtil.getDownloadManager(applicationContext).downloadIndex.getDownload(downloadId)
         } catch (e: Throwable) {
             Log.e(TAG, "getDownload failed: ${e.message}", e)
             null
         }
-
         if (download == null) {
             Log.e(TAG, "No download found for id=$downloadId")
             titleView.text = "Download not found: $title"
@@ -126,32 +140,19 @@ class OfflinePlayerActivity : Activity() {
         val manifestUri = download.request.uri
         Log.d(TAG, "starting offline playback: id=$downloadId uri=$manifestUri")
 
-        // ── Load persisted keySetId ──────────────────────────────────────────
         val keySetIdB64 = OfflineLicenseManager.getKeySetIdB64(applicationContext, downloadId)
         val keySetId: ByteArray? = keySetIdB64?.let {
             try { Base64.decode(it, Base64.NO_WRAP) }
-            catch (e: Throwable) {
-                Log.e(TAG, "keySetId decode failed: ${e.message}")
-                null
-            }
+            catch (e: Throwable) { Log.e(TAG, "keySetId decode failed: ${e.message}"); null }
         }
         Log.d(TAG, "keySetId present=${keySetId != null} length=${keySetId?.size ?: 0}")
 
-        // ── Build DRM session manager ────────────────────────────────────────
-        // If we have a keySetId, use the offline restore path.
-        // If no keySetId (signed-only, non-DRM content), no DRM manager needed.
         val drmSessionManager: DefaultDrmSessionManager? = if (keySetId != null) {
             try {
                 DefaultDrmSessionManager.Builder()
-                    .setUuidAndExoMediaDrmProvider(
-                        C.WIDEVINE_UUID,
-                        FrameworkMediaDrm.DEFAULT_PROVIDER,
-                    )
+                    .setUuidAndExoMediaDrmProvider(C.WIDEVINE_UUID, FrameworkMediaDrm.DEFAULT_PROVIDER)
                     .setMultiSession(false)
-                    .build(
-                        // Offline restore: no network calls — keySetId is the sole source
-                        androidx.media3.exoplayer.drm.LocalMediaDrmCallback(ByteArray(0))
-                    )
+                    .build(androidx.media3.exoplayer.drm.LocalMediaDrmCallback(ByteArray(0)))
                     .also { it.setMode(DefaultDrmSessionManager.MODE_PLAYBACK, keySetId) }
             } catch (e: Throwable) {
                 Log.e(TAG, "DRM manager build failed: ${e.message}", e)
@@ -162,38 +163,24 @@ class OfflinePlayerActivity : Activity() {
             null
         }
 
-        // ── Build data source: reads entirely from local cache ───────────────
         val cacheDataSourceFactory = CacheDataSource.Factory()
             .setCache(DownloadUtil.getDownloadCache(applicationContext))
             .setFlags(CacheDataSource.FLAG_BLOCK_ON_CACHE)
 
-        // ── Build media source ───────────────────────────────────────────────
         val drmManagerProvider: DrmSessionManagerProvider? =
-            if (drmSessionManager != null) DrmSessionManagerProvider { drmSessionManager }
-            else null
+            if (drmSessionManager != null) DrmSessionManagerProvider { drmSessionManager } else null
 
-        val hlsFactory = HlsMediaSource.Factory(cacheDataSourceFactory)
-            .also { factory ->
-                if (drmManagerProvider != null) {
-                    factory.setDrmSessionManagerProvider(drmManagerProvider)
-                }
-            }
+        val hlsFactory = HlsMediaSource.Factory(cacheDataSourceFactory).also { factory ->
+            if (drmManagerProvider != null) factory.setDrmSessionManagerProvider(drmManagerProvider)
+        }
 
         val mediaItem = MediaItem.Builder()
             .setMediaId(downloadId)
             .setUri(manifestUri)
             .setMimeType(MimeTypes.APPLICATION_M3U8)
             .build()
-
         val mediaSource = hlsFactory.createMediaSource(mediaItem)
 
-        // ── Build ExoPlayer ──────────────────────────────────────────────────
-        // Configure a DefaultTrackSelector so that:
-        //   • Text/subtitle tracks with no declared language are still selected
-        //     (setSelectUndeterminedTextLanguage) — fixes missing captions.
-        //   • Adaptive audio groups are presented as a single "Auto" entry in the
-        //     track-selector UI — reduces the duplicate-track clutter seen when
-        //     multiple bitrate variants of the same language are in the manifest.
         val trackSelector = androidx.media3.exoplayer.trackselection.DefaultTrackSelector(this).apply {
             setParameters(
                 buildUponParameters()
@@ -202,52 +189,25 @@ class OfflinePlayerActivity : Activity() {
                     .build()
             )
         }
-        val exo = ExoPlayer.Builder(this)
-            .setTrackSelector(trackSelector)
-            .build()
+        val exo = ExoPlayer.Builder(this).setTrackSelector(trackSelector).build()
         player = exo
         pv.player = exo
 
         exo.addListener(object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
-                Log.e(TAG,
-                    "playback error: code=${error.errorCode} msg=${error.message}",
-                    error)
+                Log.e(TAG, "playback error: code=${error.errorCode} msg=${error.message}", error)
                 titleView.text = "Playback error (${error.errorCode}): ${error.message}"
             }
             override fun onPlaybackStateChanged(state: Int) {
-                Log.d(TAG, "playbackState=${
-                    when (state) {
-                        Player.STATE_IDLE -> "IDLE"
-                        Player.STATE_BUFFERING -> "BUFFERING"
-                        Player.STATE_READY -> "READY"
-                        Player.STATE_ENDED -> "ENDED"
-                        else -> state.toString()
-                    }
-                }")
+                Log.d(TAG, "playbackState=${when (state) {
+                    Player.STATE_IDLE -> "IDLE"
+                    Player.STATE_BUFFERING -> "BUFFERING"
+                    Player.STATE_READY -> "READY"
+                    Player.STATE_ENDED -> "ENDED"
+                    else -> state.toString()
+                }}")
             }
-            override fun onTracksChanged(tracks: Tracks) {
-                // Deduplicate audio groups: HLS manifests often declare multiple
-                // audio GROUP-IDs all sharing the same display name (e.g. three
-                // copies of "Default (no VO)" at different bitrates).  Disable all
-                // but the first occurrence per name so the track-selector UI shows
-                // only one entry per language.
-                val seenNames = mutableSetOf<String>()
-                val toDisable = mutableListOf<TrackSelectionOverride>()
-                for (group in tracks.groups) {
-                    if (group.type != C.TRACK_TYPE_AUDIO) continue
-                    val fmt  = group.getTrackFormat(0)
-                    val name = fmt.label ?: fmt.language ?: "und"
-                    if (!seenNames.add(name)) {
-                        toDisable.add(TrackSelectionOverride(group.mediaTrackGroup, emptyList()))
-                    }
-                }
-                if (toDisable.isNotEmpty()) {
-                    val p = player?.trackSelectionParameters?.buildUpon() ?: return
-                    toDisable.forEach { p.addOverride(it) }
-                    player?.trackSelectionParameters = p.build()
-                }
-            }
+            override fun onTracksChanged(tracks: Tracks) { rebuildAudioChoices(tracks) }
         })
 
         exo.setMediaSource(mediaSource)
@@ -255,20 +215,81 @@ class OfflinePlayerActivity : Activity() {
         exo.playWhenReady = true
     }
 
-    override fun onStart() {
-        super.onStart()
-        player?.play()
+    private fun rebuildAudioChoices(tracks: Tracks) {
+        val bestByLanguage = linkedMapOf<String, AudioChoice>()
+        for (group in tracks.groups) {
+            if (group.type != C.TRACK_TYPE_AUDIO || group.length == 0) continue
+            for (trackIndex in 0 until group.length) {
+                if (!group.isTrackSupported(trackIndex)) continue
+                val fmt = group.getTrackFormat(trackIndex)
+                val rawLanguage = fmt.language?.trim()?.lowercase()
+                val languageKey = when {
+                    !rawLanguage.isNullOrBlank() -> rawLanguage.substringBefore('-').substringBefore('_')
+                    !fmt.label.isNullOrBlank() -> fmt.label!!.trim().lowercase()
+                    else -> "audio"
+                }
+                val candidate = AudioChoice(
+                    key = languageKey,
+                    label = languageDisplayName(rawLanguage, fmt.label),
+                    group = group.mediaTrackGroup,
+                    trackIndex = trackIndex,
+                    bitrate = if (fmt.bitrate > 0) fmt.bitrate else 0,
+                )
+                val current = bestByLanguage[languageKey]
+                if (current == null || candidate.bitrate > current.bitrate) bestByLanguage[languageKey] = candidate
+            }
+        }
+        audioChoices = bestByLanguage.values.toList()
+        audioButton?.visibility = if (audioChoices.size > 1) View.VISIBLE else View.GONE
+        Log.d(TAG, "dedup audio choices=${audioChoices.joinToString { "${it.label}[${it.key}]@${it.bitrate}" }}")
     }
 
-    override fun onStop() {
-        super.onStop()
-        player?.pause()
+    private fun languageDisplayName(language: String?, label: String?): String {
+        val base = language?.lowercase()?.substringBefore('-')?.substringBefore('_')
+        return when (base) {
+            "en", "eng" -> "English Stereo"
+            "es", "spa" -> "Spanish Stereo"
+            "sw", "swa" -> "Swahili Stereo"
+            "hi", "hin" -> "Hindi Stereo"
+            "mr", "mar" -> "Marathi Stereo"
+            "gu", "guj" -> "Gujarati Stereo"
+            else -> label?.trim().takeUnless { it.isNullOrBlank() } ?: "Audio"
+        }
     }
 
+    private fun showAudioChooser() {
+        val choices = audioChoices
+        if (choices.isEmpty()) return
+        val labels = arrayOf("Auto", *choices.map { it.label }.toTypedArray())
+        AlertDialog.Builder(this)
+            .setTitle("Audio")
+            .setSingleChoiceItems(labels, -1) { dialog, which ->
+                val currentPlayer = player ?: return@setSingleChoiceItems
+                val builder = currentPlayer.trackSelectionParameters.buildUpon().clearOverridesOfType(C.TRACK_TYPE_AUDIO)
+                if (which > 0) {
+                    val choice = choices[which - 1]
+                    builder.addOverride(TrackSelectionOverride(choice.group, listOf(choice.trackIndex)))
+                    audioButton?.text = choice.label.substringBefore(" Stereo")
+                    Log.d(TAG, "audio selected=${choice.label} key=${choice.key} bitrate=${choice.bitrate}")
+                } else {
+                    audioButton?.text = "Audio"
+                    Log.d(TAG, "audio selected=Auto")
+                }
+                currentPlayer.trackSelectionParameters = builder.build()
+                dialog.dismiss()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    override fun onStart() { super.onStart(); player?.play() }
+    override fun onStop() { super.onStop(); player?.pause() }
     override fun onDestroy() {
         super.onDestroy()
         playerView?.player = null
         player?.release()
         player = null
+        audioChoices = emptyList()
+        audioButton = null
     }
 }
