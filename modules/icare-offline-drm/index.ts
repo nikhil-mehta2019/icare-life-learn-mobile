@@ -41,6 +41,10 @@ export interface StartDownloadParams {
   thumbnailUrl?: string;
   /** Chapter duration in seconds (from estimatedMinutes * 60). */
   durationSeconds?: number;
+  /** Audio language codes to download (e.g. ["en", "es"]). Omit/empty = all languages. */
+  audioLanguages?: string[];
+  /** Caption/subtitle language codes to download. Omit/empty = all languages. */
+  captionLanguages?: string[];
 }
 
 export interface PlaybackSourceParams {

@@ -52,7 +52,7 @@ import { Alert, Platform, StyleSheet } from 'react-native';
 import { WebView, type WebViewMessageEvent } from 'react-native-webview';
 import type { ShouldStartLoadRequest } from 'react-native-webview/lib/WebViewTypes';
 import { deliverPlayerData, deliverPlayerError } from '../../api/playerCache';
-import { API_KEY, BASE_URL } from '../../api/base44Client';
+import { API_KEY, BASE_URL, fetchUserPreferences } from '../../api/base44Client';
 import IcareOfflineDrm from '../../modules/icare-offline-drm';
 
 const BASE44_URL = 'https://icare-life-learn.base44.app';
@@ -864,18 +864,59 @@ export default function ExploreScreen() {
             dlChapter?.estimatedMinutes
               ? Math.round(dlChapter.estimatedMinutes * 60)
               : undefined;
-          IcareOfflineDrm.startDownload({
-            id:            chapterId,
-            manifestUrl:   dlTokens.manifestUrl,
-            drmLicenseUrl: dlTokens.widevineLicenseUrl ?? '',
-            drmToken:      dlTokens.drmToken ?? '',
-            title:         chapterTitle,
-            thumbnailUrl,
-            durationSeconds,
-          }).catch((err: any) => {
-            console.error(`[explore] Download failed for chapter ${chapterId}:`, err);
-            Alert.alert('Download failed', err?.message ?? String(err));
-          });
+
+          (async () => {
+            // Limit the download to the user's preferred language + English
+            // (audio + captions). Falls back to downloading all available
+            // languages if preferences can't be fetched. Mirrors the same
+            // logic in app/player/[chapterId].tsx's handleDownload.
+            let downloadAudioLanguages: string[] | undefined;
+            let downloadCaptionLanguages: string[] | undefined;
+            try {
+              const jwt = getAuthJwt();
+              const prefs = jwt ? await fetchUserPreferences(jwt) : null;
+              const norm = (s: string) => s.toLowerCase().split(/[-_]/)[0];
+              const alias: Record<string, string> = { spa: 'es', eng: 'en', swa: 'sw', hin: 'hi', mar: 'mr', guj: 'gu' };
+              const toBase = (s: string) => {
+                const b = norm(s);
+                return b.length === 2 ? b : (alias[b] ?? b.slice(0, 2));
+              };
+              const wantBases = new Set(
+                [prefs?.preferredLanguage, 'en'].filter(Boolean).map((s) => toBase(String(s)))
+              );
+              const availAudio: string[] = dlTokens.audioLanguages ?? [];
+              const availCap: string[] = dlTokens.captionLanguages ?? [];
+              let matchedAudio = availAudio.filter((l: string) => wantBases.has(toBase(l)));
+              let matchedCap = availCap.filter((l: string) => wantBases.has(toBase(l)));
+              downloadAudioLanguages = matchedAudio.length
+                ? matchedAudio
+                : (availAudio.length ? undefined : Array.from(wantBases));
+              downloadCaptionLanguages = matchedCap.length ? matchedCap : undefined;
+              console.log(
+                '[explore] download langs — audio:', downloadAudioLanguages,
+                'caption:', downloadCaptionLanguages,
+              );
+            } catch (e) {
+              console.warn('[explore] preferred-language fetch failed; downloading all languages', e);
+            }
+
+            try {
+              await IcareOfflineDrm.startDownload({
+                id:            chapterId,
+                manifestUrl:   dlTokens.manifestUrl,
+                drmLicenseUrl: dlTokens.widevineLicenseUrl ?? '',
+                drmToken:      dlTokens.drmToken ?? '',
+                title:         chapterTitle,
+                thumbnailUrl,
+                durationSeconds,
+                audioLanguages:   downloadAudioLanguages,
+                captionLanguages: downloadCaptionLanguages,
+              });
+            } catch (err: any) {
+              console.error(`[explore] Download failed for chapter ${chapterId}:`, err);
+              Alert.alert('Download failed', err?.message ?? String(err));
+            }
+          })();
           break;
         }
 
@@ -889,11 +930,18 @@ export default function ExploreScreen() {
           // WebView JS can't hit HTTP endpoints — delegate to native fetch.
           const playbackId = msg.playbackId as string;
           const reqId = msg.reqId as string;
-          if (!playbackId || !reqId) break;
+          console.log(`[explore] GET_DOWNLOAD_TOKEN received — playbackId=${playbackId} reqId=${reqId}`);
+          if (!playbackId || !reqId) {
+            console.warn('[explore] GET_DOWNLOAD_TOKEN missing playbackId/reqId — ignored');
+            break;
+          }
+          const dlUrl = `http://35.154.164.178:8000/videos/by-mux-id/${encodeURIComponent(playbackId)}/download`;
+          console.log(`[explore] GET_DOWNLOAD_TOKEN fetching: ${dlUrl}`);
           fetch(
-            `http://35.154.164.178:8000/videos/by-mux-id/${encodeURIComponent(playbackId)}/download`,
+            dlUrl,
             { headers: { 'X-API-Key': 'sk_icare_1b75de18308eb135e2df9ef29aef825266eea22041f8e4a9' } }
           ).then(async (r) => {
+            console.log(`[explore] GET_DOWNLOAD_TOKEN response status=${r.status}`);
             const data = await r.json();
             if (!r.ok) throw new Error(data?.detail ?? `Download token fetch failed (${r.status})`);
             const offline = data.offline ?? {};
@@ -902,11 +950,15 @@ export default function ExploreScreen() {
               manifestUrl: offline.manifest_url ?? data.download_url ?? '',
               drmToken: offline.drm_token ?? '',
               widevineLicenseUrl: offline.widevine_license_url ?? '',
+              audioLanguages: data.audio_languages ?? [],
+              captionLanguages: data.caption_languages ?? [],
             };
+            console.log(`[explore] GET_DOWNLOAD_TOKEN success — audioLanguages=${JSON.stringify(dlTokens.audioLanguages)} captionLanguages=${JSON.stringify(dlTokens.captionLanguages)}`);
             webRef.current?.injectJavaScript(
               `(window.__icare_downloadTokenReady||{})[${JSON.stringify(reqId)}]&&window.__icare_downloadTokenReady[${JSON.stringify(reqId)}](null,${JSON.stringify(dlTokens)}); true;`
             );
           }).catch((err: any) => {
+            console.error(`[explore] GET_DOWNLOAD_TOKEN fetch failed: ${err}`);
             webRef.current?.injectJavaScript(
               `(window.__icare_downloadTokenReady||{})[${JSON.stringify(reqId)}]&&window.__icare_downloadTokenReady[${JSON.stringify(reqId)}](${JSON.stringify(String(err))},null); true;`
             );

@@ -42,6 +42,7 @@ import {
   selectMuxPlaybackId,
   getMuxTokenWithJwt,
   getMuxDownloadToken,
+  fetchUserPreferences,
 } from '../../api/base44Client';
 import { waitForPlayerData, type BridgeResult } from '../../api/playerCache';
 import { requestWebViewTokens, getAuthJwt } from '../(tabs)/explore';
@@ -589,6 +590,37 @@ export default function ChapterPlayerScreen() {
         return;
       }
 
+      // Limit the download to the user's preferred language + English (audio + captions).
+      // Falls back to downloading all available languages if preferences can't be fetched.
+      let downloadAudioLanguages: string[] | undefined;
+      let downloadCaptionLanguages: string[] | undefined;
+      try {
+        const prefs = jwt ? await fetchUserPreferences(jwt) : null;
+        const norm = (s: string) => s.toLowerCase().split(/[-_]/)[0];
+        const alias: Record<string, string> = { spa: 'es', eng: 'en', swa: 'sw', hin: 'hi', mar: 'mr', guj: 'gu' };
+        const toBase = (s: string) => {
+          const b = norm(s);
+          return b.length === 2 ? b : (alias[b] ?? b.slice(0, 2));
+        };
+        const wantBases = new Set(
+          [prefs?.preferredLanguage, 'en'].filter(Boolean).map((s) => toBase(String(s)))
+        );
+        const availAudio = dlTokens.audioLanguages ?? [];
+        const availCap = dlTokens.captionLanguages ?? [];
+        downloadAudioLanguages = availAudio.filter((l) => wantBases.has(toBase(l)));
+        downloadCaptionLanguages = availCap.filter((l) => wantBases.has(toBase(l)));
+        if (!downloadAudioLanguages.length) {
+          downloadAudioLanguages = availAudio.length ? undefined : Array.from(wantBases);
+        }
+        if (!downloadCaptionLanguages.length) downloadCaptionLanguages = undefined;
+        console.log(
+          '[player] download langs — audio:', downloadAudioLanguages,
+          'caption:', downloadCaptionLanguages,
+        );
+      } catch (e) {
+        console.warn('[player] preferred-language fetch failed; downloading all languages', e);
+      }
+
       await IcareOfflineDrm.startDownload({
         id:            chapterId,
         manifestUrl:   dlTokens.manifestUrl,
@@ -599,6 +631,8 @@ export default function ChapterPlayerScreen() {
         durationSeconds: (chapter as any).estimatedMinutes
           ? Math.round((chapter as any).estimatedMinutes * 60)
           : undefined,
+        audioLanguages:   downloadAudioLanguages,
+        captionLanguages: downloadCaptionLanguages,
       });
     } catch (err: any) {
       console.error(`[player] handleDownload: FAILED — ${err?.message}`);

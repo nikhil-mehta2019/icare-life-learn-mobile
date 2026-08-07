@@ -1,0 +1,899 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Custom HLS Player — Track Control Spike</title>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0b0d10;
+    --panel: #14171b;
+    --panel-2: #1c2026;
+    --border: #262b32;
+    --text: #e8eaed;
+    --text-dim: #8b93a1;
+    --accent: #5ecbf5;
+    --accent-dim: #2a5a6b;
+    --ok: #4caf7d;
+    --warn: #d99a3d;
+    --err: #e05d5d;
+    --mono: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    max-width: 1000px;
+    margin-inline: auto;
+  }
+  h1 {
+    font-size: 18px;
+    font-weight: 600;
+    margin: 0;
+  }
+  .sub {
+    color: var(--text-dim);
+    font-size: 13px;
+    margin: 0 0 8px;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+  }
+  .row {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  label { font-size: 12px; color: var(--text-dim); }
+  select, input[type="text"] {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 6px 8px;
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+  input[type="text"] { min-width: 320px; }
+  button {
+    background: var(--accent-dim);
+    border: 1px solid var(--accent);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  button:hover { filter: brightness(1.15); }
+  video {
+    width: 100%;
+    background: #000;
+    border-radius: 8px;
+    display: block;
+  }
+  .controls-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+  }
+  .ctl {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+  }
+  .ctl h3 {
+    margin: 0 0 8px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+  }
+  .track-btn {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--text);
+    padding: 5px 6px;
+    border-radius: 5px;
+    font-size: 12px;
+    cursor: pointer;
+    margin-bottom: 2px;
+  }
+  .track-btn:hover { background: #23282f; }
+  .track-btn.active {
+    background: var(--accent-dim);
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .status {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    white-space: pre-wrap;
+    max-height: 220px;
+    overflow-y: auto;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+  }
+  .status .ok { color: var(--ok); }
+  .status .warn { color: var(--warn); }
+  .status .err { color: var(--err); }
+  .pill {
+    display: inline-block;
+    font-size: 10px;
+    padding: 2px 7px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    margin-left: 6px;
+  }
+
+  /* ── Player shell + custom overlay controls ─────────────────────── */
+  .player-shell {
+    position: relative;
+    background: #000;
+    border-radius: 8px;
+    overflow: hidden;
+    line-height: 0;
+  }
+  .player-shell video {
+    border-radius: 0;
+    display: block;
+  }
+  .player-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    background: linear-gradient(to top, rgba(0,0,0,0.75) 0%, rgba(0,0,0,0.0) 30%, rgba(0,0,0,0.0) 70%, rgba(0,0,0,0.35) 100%);
+    opacity: 1;
+    transition: opacity 0.25s ease;
+    line-height: initial;
+    /* The overlay box spans the full player (top to bottom) even though its
+       visible content sits at top/bottom edges — without this, its empty
+       middle area would swallow clicks meant for the center play button
+       and the video underneath. Re-enable pointer-events on the actual
+       interactive rows below so they stay clickable. */
+    pointer-events: none;
+  }
+  .player-overlay .bar-top,
+  .player-overlay .bar {
+    pointer-events: auto;
+  }
+  .player-shell.controls-hidden .player-overlay { opacity: 0; pointer-events: none; }
+
+  .bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 14px 12px;
+  }
+  .bar-top {
+    display: flex;
+    justify-content: flex-end;
+    padding: 12px 14px 0;
+  }
+  .icon-btn {
+    background: transparent;
+    border: none;
+    color: #fff;
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    padding: 0;
+  }
+  .icon-btn:hover { background: rgba(255,255,255,0.15); }
+  .icon-btn svg { width: 20px; height: 20px; fill: #fff; }
+
+  .seek {
+    flex: 1;
+    -webkit-appearance: none;
+    appearance: none;
+    height: 4px;
+    border-radius: 2px;
+    background: rgba(255,255,255,0.25);
+    cursor: pointer;
+    accent-color: var(--accent);
+  }
+  .seek::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+  .time {
+    color: #fff;
+    font-family: var(--mono);
+    font-size: 11px;
+    min-width: 84px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
+  .center-play {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    opacity: 1;
+    transition: opacity 0.2s ease;
+  }
+  /* Dim (not hide) while playing — Netflix-style: still tappable to pause,
+     just visually recedes so it doesn't sit on top of the video content. */
+  .center-play.is-playing { opacity: 0; }
+  .center-play.is-playing:hover,
+  .center-play.is-playing:focus-visible { opacity: 0.85; }
+  .center-play svg {
+    width: 56px;
+    height: 56px;
+    fill: rgba(255,255,255,0.9);
+    filter: drop-shadow(0 2px 6px rgba(0,0,0,0.5));
+  }
+
+  /* ── Settings sheet (Netflix-style: gear → slide-up panel) ──────── */
+  .settings-sheet {
+    position: absolute;
+    right: 10px;
+    bottom: 56px;
+    width: 240px;
+    background: rgba(20, 23, 27, 0.97);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 8px 28px rgba(0,0,0,0.5);
+    overflow: hidden;
+    transform: translateY(8px) scale(0.98);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.15s ease, transform 0.15s ease;
+  }
+  .settings-sheet.open {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    pointer-events: auto;
+  }
+  .sheet-view { display: none; }
+  .sheet-view.active { display: block; }
+  .sheet-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .sheet-header .back-btn {
+    background: none;
+    border: none;
+    color: #fff;
+    cursor: pointer;
+    padding: 0;
+    display: flex;
+    align-items: center;
+  }
+  .sheet-header .back-btn svg { width: 16px; height: 16px; fill: #fff; }
+  .sheet-list { padding: 6px; max-height: 240px; overflow-y: auto; }
+  .sheet-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    background: none;
+    border: none;
+    color: #fff;
+    text-align: left;
+    padding: 9px 10px;
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .sheet-row:hover { background: rgba(255,255,255,0.08); }
+  .sheet-row .check { color: var(--accent); font-size: 13px; visibility: hidden; }
+  .sheet-row.active .check { visibility: visible; }
+  .sheet-row .sub { color: var(--text-dim); font-size: 11px; }
+  .sheet-row .meta { display: flex; flex-direction: column; gap: 1px; }
+</style>
+</head>
+<body>
+
+<div>
+  <h1>Custom HLS Player — Track Control Spike</h1>
+  <p class="sub">hls.js + a plain &lt;video&gt; element against a real Mux playback ID. Goal: prove we can enumerate and switch audio/caption/quality tracks ourselves, without &lt;mux-player&gt;.</p>
+</div>
+
+<div class="panel row">
+  <label for="pbid">Playback ID</label>
+  <select id="pbid">
+    <option value="OIm00UvdkI3SF18BnU00WU8A00Ceg9xlgJ31sNNZlqcDOc">public — 4 audio langs (en/hi/gu/mr), Hindi subs — verified working</option>
+    <option value="e3pZD00DAmqn02CYAlQtAwbQ5niG3HjuTbdr01nG81ip28" data-token="eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJlM3BaRDAwREFtcW4wMkNZQWxRdEF3YlE1bmlHM0hqdVRiZHIwMW5HODFpcDI4IiwiYXVkIjoidiIsImV4cCI6MTc4NTg0NjM4MCwia2lkIjoiWHlFaW1NY3BGZ3ZnTzdwbGxjck02UTAxRHdhM3FsRFVmSE9DS2QzYm9QTGsifQ.EPyTsXMQVkn3fZzl2mmoZDb75ez_w3QhDbgCw_WHn5HgXXCd1SHUoHn57O5Lfz1lr11oJU4qBzhKoru4V4cLkicXYM3C1wJN8JHQsZtdGU-FetcCHwPvzIotDHfYnG6rwgr7kmbiEW2HWRlHz1vz-Al2VypHarrQB7BrGvqQ-iviwWhDX2PeY6lDy-uUNCSVKaXi9ybzqkLdG8pxdyk4ZFVHK80YBMFNqxwKDZoDwnDLei67GxBX-yRHUCjbOJDSL36LeENkAgDGJ1v2DjcqVQnZLcT9LyUI8Z-v6zDDp_BRGkKIQTvzS9DUxRSLUXV-3IFPNa5kKIyzpl2SbIFMMw">signed — no PSSH, plays like public — token auto-fills, expires ~1hr from generation</option>
+    <option value="PhNIEXgV02IfX7i36VujOvuK5AWtQUQmfLTOnOjM6Ur00">drm — PhNIEXgV02IfX7i36VujOvuK5AWtQUQmfLTOnOjM6Ur00 (Widevine, will not decode here)</option>
+    <option value="custom">custom…</option>
+  </select>
+  <input type="text" id="pbid-custom" placeholder="paste a playback ID" style="display:none" />
+  <label for="token">Signed token (optional)</label>
+  <input type="text" id="token" placeholder="?token=... (for signed/drm IDs)" />
+  <button id="load">Load</button>
+  <button id="limit-audio-toggle">Limit audio list: Off</button>
+  <button id="test-download">Test Download (icare-video-platform)</button>
+  <span class="pill" id="engine-pill">engine: —</span>
+</div>
+
+<div class="panel">
+  <h3 style="margin:0 0 8px; font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--text-dim);">Download endpoint test</h3>
+  <p class="sub" style="margin:0 0 8px;">Calls the same endpoint the mobile app uses (<code>GET /videos/by-mux-id/&lt;playbackId&gt;/download</code>) directly from the browser — no Android network policy involved, so this isolates whether the backend/token/data are fine on their own.</p>
+  <div class="status" id="download-result" style="max-height:none;">not run yet</div>
+</div>
+
+<div class="panel">
+  <div class="player-shell" id="player-shell">
+    <video id="video" playsinline></video>
+
+    <button class="center-play" id="center-play" aria-label="Play">
+      <svg id="center-play-icon" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+      <svg id="center-pause-icon" viewBox="0 0 24 24" style="display:none;"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
+    </button>
+
+    <div class="player-overlay">
+      <div class="bar-top">
+        <button class="icon-btn" id="settings-btn" aria-label="Audio &amp; Subtitles">
+          <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.31.06-.62.06-.94 0-.32-.02-.63-.07-.94l2.03-1.58a.5.5 0 00.12-.64l-1.92-3.32a.5.5 0 00-.61-.22l-2.39.96a7.4 7.4 0 00-1.62-.94l-.36-2.54a.5.5 0 00-.5-.42h-3.84a.5.5 0 00-.5.42l-.36 2.54c-.59.24-1.13.56-1.62.94l-2.39-.96a.5.5 0 00-.61.22L2.74 8.84a.5.5 0 00.12.64l2.03 1.58c-.05.31-.09.63-.09.94s.02.63.07.94l-2.03 1.58a.5.5 0 00-.12.64l1.92 3.32c.14.24.42.32.61.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.28.27.42.5.42h3.84c.24 0 .46-.14.5-.42l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.24.1.48.02.61-.22l1.92-3.32a.5.5 0 00-.12-.64l-2.01-1.58zM12 15.6A3.6 3.6 0 1112 8.4a3.6 3.6 0 010 7.2z"/></svg>
+        </button>
+      </div>
+      <div class="bar">
+        <button class="icon-btn" id="playpause-btn" aria-label="Play">
+          <svg id="play-icon" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+          <svg id="pause-icon" viewBox="0 0 24 24" style="display:none;"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
+        </button>
+        <span class="time" id="time-current">0:00</span>
+        <input type="range" class="seek" id="seek" min="0" max="1000" value="0" />
+        <span class="time" id="time-total">0:00</span>
+        <button class="icon-btn" id="mute-btn" aria-label="Mute">
+          <svg id="mute-icon-on" viewBox="0 0 24 24"><path d="M3 10v4h4l5 5V5L7 10H3zm13.5 2A4.5 4.5 0 0014 7.97v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
+          <svg id="mute-icon-off" viewBox="0 0 24 24" style="display:none;"><path d="M16.5 12A4.5 4.5 0 0014 7.97v2.21l2.45 2.45c.03-.2.05-.42.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51A8.796 8.796 0 0021 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06a8.99 8.99 0 003.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4l-1.88 1.88L12 7.76V4z"/></svg>
+        </button>
+        <input type="range" class="seek" id="volume" min="0" max="100" value="100" style="max-width:70px;" />
+      </div>
+    </div>
+
+    <div class="settings-sheet" id="settings-sheet">
+      <div class="sheet-view active" id="sheet-menu">
+        <div class="sheet-header">Playback</div>
+        <div class="sheet-list">
+          <button class="sheet-row" data-goto="sheet-audio">
+            <span class="meta">
+              <span>Audio</span>
+              <span class="sub" id="audio-current-label">—</span>
+            </span>
+            <span>›</span>
+          </button>
+          <button class="sheet-row" data-goto="sheet-captions">
+            <span class="meta">
+              <span>Subtitles</span>
+              <span class="sub" id="caption-current-label">—</span>
+            </span>
+            <span>›</span>
+          </button>
+        </div>
+      </div>
+      <div class="sheet-view" id="sheet-audio">
+        <div class="sheet-header">
+          <button class="back-btn" data-goto="sheet-menu"><svg viewBox="0 0 24 24"><path d="M15.4 7.4L14 6l-6 6 6 6 1.4-1.4L10.8 12z"/></svg></button>
+          Audio
+        </div>
+        <div class="sheet-list" id="sheet-audio-list"></div>
+      </div>
+      <div class="sheet-view" id="sheet-captions">
+        <div class="sheet-header">
+          <button class="back-btn" data-goto="sheet-menu"><svg viewBox="0 0 24 24"><path d="M15.4 7.4L14 6l-6 6 6 6 1.4-1.4L10.8 12z"/></svg></button>
+          Subtitles
+        </div>
+        <div class="sheet-list" id="sheet-caption-list"></div>
+      </div>
+    </div>
+  </div>
+  <p class="sub" style="margin:10px 2px 0;">↑ Tap the gear icon on the video for the Netflix-style Audio/Subtitles picker. The panel below is a debug view of the same underlying state.</p>
+</div>
+
+<div class="controls-grid">
+  <div class="ctl">
+    <h3>Quality (video) — debug</h3>
+    <div id="quality-list"><span style="color:var(--text-dim); font-size:12px;">load a stream first</span></div>
+  </div>
+  <div class="ctl">
+    <h3>Audio track</h3>
+    <div id="audio-list"><span style="color:var(--text-dim); font-size:12px;">load a stream first</span></div>
+  </div>
+  <div class="ctl">
+    <h3>Captions / subtitles</h3>
+    <div id="caption-list"><span style="color:var(--text-dim); font-size:12px;">load a stream first</span></div>
+  </div>
+</div>
+
+<div class="panel">
+  <h3 style="margin:0 0 8px; font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--text-dim);">Log</h3>
+  <div class="status" id="log"></div>
+</div>
+
+<script>
+(function () {
+  const video = document.getElementById('video');
+  const logEl = document.getElementById('log');
+  const pbidSelect = document.getElementById('pbid');
+  const pbidCustom = document.getElementById('pbid-custom');
+  const tokenInput = document.getElementById('token');
+  const loadBtn = document.getElementById('load');
+  const enginePill = document.getElementById('engine-pill');
+  const qualityList = document.getElementById('quality-list');
+  const audioList = document.getElementById('audio-list');
+  const captionList = document.getElementById('caption-list');
+
+  // Netflix-style overlay elements
+  const playerShell = document.getElementById('player-shell');
+  const centerPlay = document.getElementById('center-play');
+  const settingsBtn = document.getElementById('settings-btn');
+  const settingsSheet = document.getElementById('settings-sheet');
+  const seek = document.getElementById('seek');
+  const timeCurrent = document.getElementById('time-current');
+  const timeTotal = document.getElementById('time-total');
+  const audioCurrentLabel = document.getElementById('audio-current-label');
+  const captionCurrentLabel = document.getElementById('caption-current-label');
+  const sheetAudioList = document.getElementById('sheet-audio-list');
+  const sheetCaptionList = document.getElementById('sheet-caption-list');
+  const muteBtn = document.getElementById('mute-btn');
+  const muteIconOn = document.getElementById('mute-icon-on');
+  const muteIconOff = document.getElementById('mute-icon-off');
+  const volumeSlider = document.getElementById('volume');
+
+  let hls = null;
+
+  function log(msg, cls) {
+    const line = document.createElement('div');
+    if (cls) line.className = cls;
+    const ts = new Date().toLocaleTimeString();
+    line.textContent = '[' + ts + '] ' + msg;
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  pbidSelect.addEventListener('change', () => {
+    pbidCustom.style.display = pbidSelect.value === 'custom' ? 'inline-block' : 'none';
+    const opt = pbidSelect.options[pbidSelect.selectedIndex];
+    const presetToken = opt && opt.dataset.token;
+    tokenInput.value = presetToken || '';
+    if (presetToken) log('signed token auto-filled from preset — if playback fails with 403, the token has expired and needs regenerating', 'warn');
+  });
+
+  function currentPlaybackId() {
+    return pbidSelect.value === 'custom' ? pbidCustom.value.trim() : pbidSelect.value;
+  }
+
+  function buildStreamUrl() {
+    const id = currentPlaybackId();
+    if (!id) return null;
+    const token = tokenInput.value.trim();
+    const base = `https://stream.mux.com/${id}.m3u8`;
+    return token ? `${base}?token=${encodeURIComponent(token.replace(/^\?token=/, ''))}` : base;
+  }
+
+  function clear(el) { el.innerHTML = ''; }
+
+  function renderQualityLevels(levels, currentIndex, onPick) {
+    clear(qualityList);
+    const mkBtn = (label, isActive, onClick) => {
+      const b = document.createElement('button');
+      b.className = 'track-btn' + (isActive ? ' active' : '');
+      b.textContent = label;
+      b.onclick = onClick;
+      qualityList.appendChild(b);
+    };
+    mkBtn('Auto (ABR)', currentIndex === -1, () => onPick(-1));
+    levels.forEach((lvl, i) => {
+      const label = `${lvl.height}p · ${Math.round(lvl.bitrate / 1000)}kbps`;
+      mkBtn(label, currentIndex === i, () => onPick(i));
+    });
+  }
+
+  function renderAudioTracks(tracks, currentId, onPick) {
+    clear(audioList);
+    if (!tracks.length) {
+      audioList.innerHTML = '<span style="color:var(--text-dim); font-size:12px;">single audio track (no alternates in manifest)</span>';
+      return;
+    }
+    tracks.forEach((t) => {
+      const b = document.createElement('button');
+      b.className = 'track-btn' + (t.id === currentId ? ' active' : '');
+      b.textContent = `${t.name || t.lang || 'track ' + t.id} (${t.lang || 'und'})`;
+      b.onclick = () => onPick(t.id);
+      audioList.appendChild(b);
+    });
+  }
+
+  function renderCaptionTracks(textTracks, onPick) {
+    clear(captionList);
+    const list = Array.from(textTracks || []).filter(t => t.kind === 'subtitles' || t.kind === 'captions');
+    const mkBtn = (label, isActive, onClick) => {
+      const b = document.createElement('button');
+      b.className = 'track-btn' + (isActive ? ' active' : '');
+      b.textContent = label;
+      b.onclick = onClick;
+      captionList.appendChild(b);
+    };
+    mkBtn('Off', list.every(t => t.mode !== 'showing'), () => onPick(-1));
+    list.forEach((t, i) => {
+      mkBtn(`${t.label || t.language || 'track ' + i} (${t.language || 'und'})`, t.mode === 'showing', () => onPick(i));
+    });
+    if (!list.length) {
+      captionList.innerHTML = '<span style="color:var(--text-dim); font-size:12px;">no caption tracks in manifest</span>';
+    }
+  }
+
+  // ── Netflix-style sheet: Audio & Subtitles lists ──────────────────
+  // Renders into the in-player overlay sheet, reusing the same pick
+  // callbacks as the debug panels below so both stay in sync from one
+  // source of truth (hls.js state / video.textTracks).
+  function renderSheetAudio(tracks, currentId, onPick) {
+    clear(sheetAudioList);
+    if (!tracks.length) {
+      sheetAudioList.innerHTML = '<div class="sheet-row" style="cursor:default;">Only one audio track</div>';
+      audioCurrentLabel.textContent = 'Default';
+      return;
+    }
+    let currentLabel = '—';
+    tracks.forEach((t) => {
+      const isActive = t.id === currentId;
+      const label = t.name || t.lang || `Track ${t.id}`;
+      if (isActive) currentLabel = label;
+      const row = document.createElement('button');
+      row.className = 'sheet-row' + (isActive ? ' active' : '');
+      row.innerHTML = `<span>${label}</span><span class="check">✓</span>`;
+      row.onclick = () => { onPick(t.id); closeSheet(); };
+      sheetAudioList.appendChild(row);
+    });
+    audioCurrentLabel.textContent = currentLabel;
+  }
+
+  function renderSheetCaptions(textTracks, onPick) {
+    clear(sheetCaptionList);
+    const list = Array.from(textTracks || []).filter(t => t.kind === 'subtitles' || t.kind === 'captions');
+    const offRow = document.createElement('button');
+    const noneOn = list.every(t => t.mode !== 'showing');
+    offRow.className = 'sheet-row' + (noneOn ? ' active' : '');
+    offRow.innerHTML = `<span>Off</span><span class="check">✓</span>`;
+    offRow.onclick = () => { onPick(-1); closeSheet(); };
+    sheetCaptionList.appendChild(offRow);
+
+    let currentLabel = 'Off';
+    list.forEach((t, i) => {
+      const isActive = t.mode === 'showing';
+      const label = t.label || t.language || `Track ${i}`;
+      if (isActive) currentLabel = label;
+      const row = document.createElement('button');
+      row.className = 'sheet-row' + (isActive ? ' active' : '');
+      row.innerHTML = `<span>${label}</span><span class="check">✓</span>`;
+      row.onclick = () => { onPick(i); closeSheet(); };
+      sheetCaptionList.appendChild(row);
+    });
+    captionCurrentLabel.textContent = currentLabel;
+  }
+
+  function wireHlsControls() {
+    const onLevelSwitched = () => renderQualityLevels(hls.levels, hls.currentLevel, pickLevel);
+    function pickLevel(i) {
+      hls.currentLevel = i;
+      log(`quality set to ${i === -1 ? 'Auto' : hls.levels[i].height + 'p'}`, 'ok');
+    }
+    renderQualityLevels(hls.levels, hls.currentLevel, pickLevel);
+    hls.on(Hls.Events.LEVEL_SWITCHED, onLevelSwitched);
+
+    function pickAudio(id) {
+      hls.audioTrack = id;
+      log(`audio track set to id=${id}`, 'ok');
+    }
+    // Show only preferred + default/"und" in the UI (both the debug panel
+    // and the in-player sheet), even though hls.js still knows about every
+    // track in the manifest internally. This is the pattern we'd use for
+    // the real "preferred language" feature — limit what the picker offers
+    // rather than exposing every language the video happens to have.
+    // Null/undefined = show everything (current default, unfiltered).
+    // Re-applies the current toggle state on every fresh load, so switching
+    // playback IDs doesn't silently reset a filter the user already turned on.
+    let visibleAudioLangs = window.__audioListLimited ? window.__PREFERRED_PLUS_DEFAULT : null;
+    function visibleTracks(tracks) {
+      if (!visibleAudioLangs) return tracks;
+      return tracks.filter(t => visibleAudioLangs.includes((t.lang || 'und').toLowerCase()));
+    }
+    function refreshAudio() {
+      const shown = visibleTracks(hls.audioTracks);
+      renderAudioTracks(shown, hls.audioTrack, pickAudio);
+      renderSheetAudio(shown, hls.audioTrack, pickAudio);
+    }
+    refreshAudio();
+    hls.on(Hls.Events.AUDIO_TRACK_SWITCHED, refreshAudio);
+    // Exposed on window so the toggle button below can flip the filter and
+    // re-render without touching hls.js's own state.
+    window.__setVisibleAudioLangs = (langs) => { visibleAudioLangs = langs; refreshAudio(); };
+
+    // Default audio language, in priority order. First match wins.
+    // Applied on AUDIO_TRACKS_UPDATED (fires once the full track list for the
+    // current quality level is known) rather than only at MANIFEST_PARSED,
+    // since audioTracks can be empty/partial at the exact MANIFEST_PARSED
+    // instant depending on how the master playlist declares audio groups.
+    const DEFAULT_AUDIO_LANGS = ['hi'];
+    let defaultApplied = false;
+    function applyDefaultAudioLanguage() {
+      if (defaultApplied) return;
+      const tracks = hls.audioTracks;
+      log(`audio tracks available for default-selection: ${tracks.map(t => t.lang || 'und').join(', ') || '(none yet)'}`);
+      if (!tracks.length) return; // not populated yet — wait for the next event
+      defaultApplied = true;
+      const defaultTrack = tracks.find(t =>
+        DEFAULT_AUDIO_LANGS.includes((t.lang || '').toLowerCase())
+      );
+      if (defaultTrack && defaultTrack.id !== hls.audioTrack) {
+        log(`applying default audio language: ${defaultTrack.name || defaultTrack.lang}`, 'ok');
+        pickAudio(defaultTrack.id);
+      } else if (!defaultTrack) {
+        log(`no track matched default language(s) [${DEFAULT_AUDIO_LANGS.join(', ')}] — keeping manifest default`, 'warn');
+      }
+    }
+    applyDefaultAudioLanguage();
+    hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, applyDefaultAudioLanguage);
+
+    function pickCaption(i) {
+      Array.from(video.textTracks).forEach((t, idx) => {
+        if (t.kind !== 'subtitles' && t.kind !== 'captions') return;
+        t.mode = (idx === i) ? 'showing' : 'disabled';
+      });
+      refreshCaptions();
+      log(`caption track set to ${i === -1 ? 'Off' : i}`, 'ok');
+    }
+    function refreshCaptions() {
+      renderCaptionTracks(video.textTracks, pickCaption);
+      renderSheetCaptions(video.textTracks, pickCaption);
+    }
+    refreshCaptions();
+    video.textTracks.onaddtrack = refreshCaptions;
+  }
+
+  // ── Overlay chrome: play/pause, seek, gear → sheet navigation ─────
+  function fmtTime(s) {
+    if (!isFinite(s) || s < 0) return '0:00';
+    const m = Math.floor(s / 60);
+    const sec = Math.floor(s % 60).toString().padStart(2, '0');
+    return `${m}:${sec}`;
+  }
+
+  const playPauseBtn = document.getElementById('playpause-btn');
+  const playIcon = document.getElementById('play-icon');
+  const pauseIcon = document.getElementById('pause-icon');
+  const centerPlayIcon = document.getElementById('center-play-icon');
+  const centerPauseIcon = document.getElementById('center-pause-icon');
+
+  function togglePlay() {
+    if (video.paused) video.play().catch(() => {}); else video.pause();
+  }
+  function updatePlayIcon() {
+    const paused = video.paused;
+    // Center button: always visible/clickable — icon swaps play↔pause and
+    // it dims (not disappears) while playing, matching Netflix's overlay.
+    centerPlay.classList.toggle('is-playing', !paused);
+    centerPlayIcon.style.display = paused ? 'block' : 'none';
+    centerPauseIcon.style.display = paused ? 'none' : 'block';
+    centerPlay.setAttribute('aria-label', paused ? 'Play' : 'Pause');
+    // Bottom-bar button: same icon swap, always fully visible.
+    playIcon.style.display = paused ? 'block' : 'none';
+    pauseIcon.style.display = paused ? 'none' : 'block';
+    playPauseBtn.setAttribute('aria-label', paused ? 'Play' : 'Pause');
+  }
+  video.addEventListener('play', updatePlayIcon);
+  video.addEventListener('pause', updatePlayIcon);
+  centerPlay.addEventListener('click', togglePlay);
+  playPauseBtn.addEventListener('click', (e) => { e.stopPropagation(); togglePlay(); });
+  playerShell.addEventListener('click', (e) => {
+    if (e.target === video) togglePlay();
+  });
+  updatePlayIcon();
+
+  // Unmuted autoplay is blocked by browser policy unless the user already
+  // interacted with the page. Try unmuted first (so sound works out of the
+  // box when allowed); if the browser rejects it, fall back to a muted
+  // start so playback isn't stuck, and unmute automatically on first click.
+  function attemptAutoplay() {
+    video.muted = false;
+    updateMuteIcon();
+    video.play().catch(() => {
+      log('unmuted autoplay blocked by browser — starting muted, click to unmute', 'warn');
+      video.muted = true;
+      updateMuteIcon();
+      video.play().catch(() => {});
+    });
+  }
+
+  function updateMuteIcon() {
+    const isMuted = video.muted || video.volume === 0;
+    muteIconOn.style.display = isMuted ? 'none' : 'block';
+    muteIconOff.style.display = isMuted ? 'block' : 'none';
+    volumeSlider.value = isMuted ? 0 : Math.round(video.volume * 100);
+  }
+  muteBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    video.muted = !video.muted;
+    if (!video.muted && video.volume === 0) video.volume = 1;
+    updateMuteIcon();
+  });
+  volumeSlider.addEventListener('click', (e) => e.stopPropagation());
+  volumeSlider.addEventListener('input', () => {
+    const v = Number(volumeSlider.value) / 100;
+    video.volume = v;
+    video.muted = v === 0;
+    updateMuteIcon();
+  });
+  updateMuteIcon();
+
+  let seeking = false;
+  video.addEventListener('timeupdate', () => {
+    if (seeking || !video.duration) return;
+    seek.value = String((video.currentTime / video.duration) * 1000);
+    timeCurrent.textContent = fmtTime(video.currentTime);
+  });
+  video.addEventListener('loadedmetadata', () => {
+    timeTotal.textContent = fmtTime(video.duration);
+  });
+  seek.addEventListener('input', () => {
+    seeking = true;
+    timeCurrent.textContent = fmtTime((seek.value / 1000) * (video.duration || 0));
+  });
+  seek.addEventListener('change', () => {
+    if (video.duration) video.currentTime = (seek.value / 1000) * video.duration;
+    seeking = false;
+  });
+
+  function showSheetView(id) {
+    document.querySelectorAll('.sheet-view').forEach(v => v.classList.toggle('active', v.id === id));
+  }
+  function openSheet() {
+    settingsSheet.classList.add('open');
+    showSheetView('sheet-menu');
+  }
+  function closeSheet() {
+    settingsSheet.classList.remove('open');
+  }
+  settingsBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    settingsSheet.classList.contains('open') ? closeSheet() : openSheet();
+  });
+  settingsSheet.addEventListener('click', (e) => {
+    const nav = e.target.closest('[data-goto]');
+    if (nav) showSheetView(nav.dataset.goto);
+  });
+  document.addEventListener('click', (e) => {
+    if (!settingsSheet.contains(e.target) && e.target !== settingsBtn && !settingsBtn.contains(e.target)) {
+      closeSheet();
+    }
+  });
+
+  function loadNative(url) {
+    // Safari / iOS: native HLS support, no hls.js needed.
+    enginePill.textContent = 'engine: native HLS';
+    video.src = url;
+    log('using native HLS playback (Safari/iOS) — hls.js not needed on this browser', 'warn');
+    log('note: native path exposes tracks via video.audioTracks / video.textTracks, not covered by this spike\'s UI wiring yet', 'warn');
+  }
+
+  function loadWithHlsJs(url) {
+    enginePill.textContent = 'engine: hls.js';
+    if (hls) { hls.destroy(); hls = null; }
+    hls = new Hls({ debug: false });
+    hls.on(Hls.Events.ERROR, (evt, data) => {
+      log(`hls.js error: ${data.type} / ${data.details}${data.fatal ? ' (FATAL)' : ''}`, data.fatal ? 'err' : 'warn');
+    });
+    hls.on(Hls.Events.MANIFEST_PARSED, (evt, data) => {
+      log(`manifest parsed — ${data.levels.length} quality level(s), ${hls.audioTracks.length} audio track(s)`, 'ok');
+      wireHlsControls();
+      attemptAutoplay();
+    });
+    hls.loadSource(url);
+    hls.attachMedia(video);
+  }
+
+  loadBtn.addEventListener('click', () => {
+    const url = buildStreamUrl();
+    if (!url) { log('enter a playback ID first', 'err'); return; }
+    log(`loading: ${url}`);
+    clear(qualityList); clear(audioList); clear(captionList);
+
+    // Prefer hls.js whenever it's supported — that's the actual point of this
+    // spike (custom track control via the hls.js API). Chrome/Edge/Firefox
+    // report canPlayType('application/vnd.apple.mpegurl') as falsy normally,
+    // but some Chromium builds/extensions can make it lie, so check hls.js
+    // support FIRST and only fall back to the native <video> HLS path when
+    // hls.js genuinely isn't usable (true Safari/iOS, where native tracks
+    // work fine on their own).
+    if (window.Hls && Hls.isSupported()) {
+      loadWithHlsJs(url);
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      loadNative(url);
+    } else {
+      log('neither hls.js nor native HLS is supported in this browser', 'err');
+    }
+  });
+
+  // ── Limit-audio-list toggle: shows only "preferred + default" instead of
+  // every language the manifest declares — proves we can curate the picker
+  // to a subset (e.g. user's preferred language + English/original) rather
+  // than always listing every available track.
+  const limitAudioToggle = document.getElementById('limit-audio-toggle');
+  window.__audioListLimited = false;
+  window.__PREFERRED_PLUS_DEFAULT = ['hi', 'und']; // preferred language + manifest default
+  limitAudioToggle.addEventListener('click', () => {
+    window.__audioListLimited = !window.__audioListLimited;
+    limitAudioToggle.textContent = `Limit audio list: ${window.__audioListLimited ? 'On' : 'Off'}`;
+    if (typeof window.__setVisibleAudioLangs === 'function') {
+      window.__setVisibleAudioLangs(window.__audioListLimited ? window.__PREFERRED_PLUS_DEFAULT : null);
+      log(
+        window.__audioListLimited
+          ? `audio list limited to: ${window.__PREFERRED_PLUS_DEFAULT.join(', ')}`
+          : 'audio list showing all available languages',
+        'ok'
+      );
+    } else {
+      log('load a stream first before toggling the audio list filter', 'warn');
+    }
+  });
+
+  log('ready — pick a playback ID and click Load. Public ID needs no token; signed/DRM IDs need a token param and DRM ones will not decode without a license server.');
+
+  // ── Download endpoint test — same call the mobile app makes ──────────
+  const testDownloadBtn = document.getElementById('test-download');
+  const downloadResultEl = document.getElementById('download-result');
+  const ICARE_VIDEO_API_BASE = 'http://35.154.164.178:8000';
+  const ICARE_VIDEO_API_KEY = 'sk_icare_1b75de18308eb135e2df9ef29aef825266eea22041f8e4a9';
+
+  testDownloadBtn.addEventListener('click', async () => {
+    const id = currentPlaybackId();
+    if (!id) { downloadResultEl.textContent = 'pick a playback ID first'; return; }
+    downloadResultEl.textContent = 'requesting…';
+    const url = `${ICARE_VIDEO_API_BASE}/videos/by-mux-id/${encodeURIComponent(id)}/download`;
+    try {
+      const res = await fetch(url, { headers: { 'X-API-Key': ICARE_VIDEO_API_KEY } });
+      const data = await res.json();
+      downloadResultEl.textContent =
+        `HTTP ${res.status}\nurl: ${url}\n\n` + JSON.stringify(data, null, 2);
+      log(`download endpoint test: HTTP ${res.status}`, res.ok ? 'ok' : 'err');
+    } catch (err) {
+      downloadResultEl.textContent = `fetch failed: ${err}`;
+      log(`download endpoint test failed: ${err}`, 'err');
+    }
+  });
+})();
+</script>
+
+</body>
+</html>

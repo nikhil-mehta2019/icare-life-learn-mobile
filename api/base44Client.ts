@@ -112,6 +112,14 @@ export interface MuxDownloadTokenResponse {
   manifestUrl: string;
   drmToken: string | null;
   widevineLicenseUrl: string | null;
+  /** Audio language codes available for this video (e.g. ["en", "es"]). */
+  audioLanguages: string[];
+  /** Caption/subtitle language codes available for this video. */
+  captionLanguages: string[];
+}
+
+export interface UserPreferences {
+  preferredLanguage: string | null;
 }
 
 export interface StudentAccessResponse {
@@ -254,7 +262,29 @@ export async function getMuxDownloadToken(
     manifestUrl: offline.manifest_url ?? (data as any).download_url ?? '',
     drmToken: offline.drm_token ?? '',
     widevineLicenseUrl: offline.widevine_license_url ?? '',
+    audioLanguages: (data as any).audio_languages ?? [],
+    captionLanguages: (data as any).caption_languages ?? [],
   };
+}
+
+/**
+ * Get the authenticated user's preferences (currently just preferredLanguage)
+ * from the Base44 backend function getMyPreferences.
+ */
+export async function fetchUserPreferences(jwt: string): Promise<UserPreferences> {
+  const response = await fetch(`${BASE_URL}/functions/getMyPreferences`, {
+    method: 'POST',
+    headers: { ...defaultHeaders, Authorization: `Bearer ${jwt}` },
+    body: JSON.stringify({}),
+  });
+  const data = await response.json().catch(() => ({} as any));
+  if (!response.ok) {
+    throw new Error((data as any)?.error ?? `getMyPreferences failed (${response.status})`);
+  }
+  const d = data as any;
+  const pref =
+    d?.preferredLanguage ?? d?.preferred_language ?? d?.data?.preferredLanguage ?? d?.user?.preferredLanguage ?? null;
+  return { preferredLanguage: pref ? String(pref).toLowerCase() : null };
 }
 
 /**

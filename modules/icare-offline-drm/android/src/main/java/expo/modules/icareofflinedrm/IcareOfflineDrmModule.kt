@@ -29,6 +29,10 @@ class StartDownloadParamsRecord : Record, Serializable {
   @Field var title: String? = null
   @Field var thumbnailUrl: String? = null
   @Field var durationSeconds: Int? = null
+  /** Audio language codes to download (e.g. ["en", "es"]). Null/empty = all languages. */
+  @Field var audioLanguages: List<String>? = null
+  /** Caption/subtitle language codes to download. Null/empty = all languages. */
+  @Field var captionLanguages: List<String>? = null
 }
 
 class PlaybackSourceParamsRecord : Record, Serializable {
@@ -131,6 +135,13 @@ class IcareOfflineDrmModule : Module() {
                   val defaultParams = androidx.media3.exoplayer.offline.DownloadHelper
                     .getDefaultTrackSelectorParameters(ctx)
 
+                  // Empty/null set = no filtering (download all languages).
+                  val audioLangFilter = params.audioLanguages?.filter { it.isNotBlank() }?.toSet() ?: emptySet()
+                  val captionLangFilter = params.captionLanguages?.filter { it.isNotBlank() }?.toSet() ?: emptySet()
+                  android.util.Log.d("IcareOfflineDrm",
+                    "onPrepared: audioLangFilter=$audioLangFilter captionLangFilter=$captionLangFilter " +
+                    "(raw params.audioLanguages=${params.audioLanguages} params.captionLanguages=${params.captionLanguages})")
+
                   for (periodIndex in 0 until h.periodCount) {
                     h.clearTrackSelections(periodIndex)
                     val tga = h.getTrackGroups(periodIndex) // returns TrackGroupArray in Media3 1.8.0
@@ -147,12 +158,19 @@ class IcareOfflineDrmModule : Module() {
                       val g   = tga.get(i)
                       if (g.length == 0) continue
                       val fmt = g.getFormat(0)
-                      if (!MimeTypes.isAudio(fmt.sampleMimeType ?: "")) continue
+                      val isAudio = MimeTypes.isAudio(fmt.sampleMimeType ?: "")
+                      android.util.Log.d("IcareOfflineDrm",
+                        "onPrepared: period=$periodIndex group[$i] mime=${fmt.sampleMimeType} isAudio=$isAudio " +
+                        "lang=${fmt.language} bitrate=${fmt.bitrate} id=${fmt.id}")
+                      if (!isAudio) continue
                       val lang = fmt.language ?: "und"
+                      if (audioLangFilter.isNotEmpty() && lang !in audioLangFilter) continue
                       val bits = if (fmt.bitrate > 0) fmt.bitrate else Int.MAX_VALUE
                       val cur  = bestAudioPerLang[lang]
                       if (cur == null || bits >= cur.second) bestAudioPerLang[lang] = Pair(i, bits)
                     }
+                    android.util.Log.d("IcareOfflineDrm",
+                      "onPrepared: bestAudioPerLang=$bestAudioPerLang (selecting ${bestAudioPerLang.size} audio group(s) for download)")
 
                     // 1. Video — let defaultParams pick the adaptive quality set
                     h.addTrackSelection(
@@ -176,11 +194,14 @@ class IcareOfflineDrmModule : Module() {
                       )
                     }
 
-                    // 3. Text/subtitle — include every declared group (all languages)
+                    // 3. Text/subtitle — include declared groups, filtered by captionLangFilter
+                    //    (empty filter = all languages, preserving prior behavior)
                     for (i in 0 until tga.length) {
                       val g = tga.get(i)
                       if (g.length == 0) continue
                       if (!MimeTypes.isText(g.getFormat(0).sampleMimeType ?: "")) continue
+                      val lang = g.getFormat(0).language ?: "und"
+                      if (captionLangFilter.isNotEmpty() && lang !in captionLangFilter) continue
                       h.addTrackSelection(
                         periodIndex,
                         defaultParams.buildUpon()
@@ -194,14 +215,21 @@ class IcareOfflineDrmModule : Module() {
 
                   downloadRequestRef.set(h.getDownloadRequest(params.id, null))
                 }
-                catch (e: Throwable) { prepErr.set(e) }
+                catch (e: Throwable) {
+                  android.util.Log.e("IcareOfflineDrm", "onPrepared track-selection failed", e)
+                  prepErr.set(e)
+                }
                 latch.countDown()
               }
               override fun onPrepareError(h: androidx.media3.exoplayer.offline.DownloadHelper, e: java.io.IOException) {
+                android.util.Log.e("IcareOfflineDrm", "onPrepareError", e)
                 prepErr.set(e); latch.countDown()
               }
             })
-          } catch (e: Throwable) { prepErr.set(e); latch.countDown() }
+          } catch (e: Throwable) {
+            android.util.Log.e("IcareOfflineDrm", "DownloadHelper.prepare threw", e)
+            prepErr.set(e); latch.countDown()
+          }
         }
         if (!latch.await(10, java.util.concurrent.TimeUnit.SECONDS)) {
           throw java.io.IOException("DownloadHelper prep timed out")
@@ -223,7 +251,8 @@ class IcareOfflineDrmModule : Module() {
 
         promise.resolve(null)
       } catch (e: Throwable) {
-        promise.reject("EDOWNLOAD_START_FAILED", e.message ?: "Unknown error", e)
+        android.util.Log.e("IcareOfflineDrm", "startDownload failed", e)
+        promise.reject("EDOWNLOAD_START_FAILED", e.message ?: e.toString(), e)
       }
     }
 
