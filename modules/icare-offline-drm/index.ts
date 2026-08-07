@@ -50,10 +50,25 @@ export interface StorageStats {
   downloadCount: number;
 }
 
+export interface DeviceStorageStats {
+  totalBytes: number;
+  freeBytes: number;
+  usedBytes: number;
+}
+
+export interface DownloadEntitlement {
+  courseId: string | null;
+  chapterId: string | null;
+  accessExpiresAt: string | null;
+  validatedAt: string | null;
+}
+
 const NativeModule =
   Platform.OS === 'android' ? requireNativeModule('IcareOfflineDrm') : null;
 const NativeLanguagePreferences =
   Platform.OS === 'android' ? requireNativeModule('IcareLanguagePreferences') : null;
+const NativeDownloadManager =
+  Platform.OS === 'android' ? requireNativeModule('IcareDownloadManager') : null;
 
 function ensureAndroid(method: string) {
   if (Platform.OS !== 'android') {
@@ -62,6 +77,10 @@ function ensureAndroid(method: string) {
       `iOS uses FairPlay offline via AVAssetDownloadTask — not yet implemented.`
     );
   }
+}
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
 async function refreshNativeLanguagePreferences(): Promise<void> {
@@ -98,14 +117,35 @@ export const IcareOfflineDrm = {
     return NativeModule.resumeDownload(id);
   },
 
+  /**
+   * Media3 removal is asynchronous. Resolve only after the DownloadIndex no
+   * longer contains the item so React screens never reinterpret REMOVING as a
+   * fresh/active download. This also makes Delete a single deterministic action.
+   */
   async removeDownload(id: string): Promise<void> {
     ensureAndroid('removeDownload');
-    return NativeModule.removeDownload(id);
+    await NativeModule.removeDownload(id);
+
+    const deadline = Date.now() + 12_000;
+    while (Date.now() < deadline) {
+      const current = await NativeModule.getDownload(id);
+      if (!current) {
+        try { await NativeDownloadManager?.clearEntitlement(id); } catch { /* non-fatal */ }
+        return;
+      }
+      await sleep(250);
+    }
+
+    // Do not lie to the UI: if Media3 still owns the row after the deadline,
+    // surface a real failure rather than showing the item as deleted.
+    throw new Error('Download removal is still pending. Please try again in a moment.');
   },
 
   async listDownloads(): Promise<DownloadInfo[]> {
     if (Platform.OS !== 'android') return [];
-    return NativeModule.listDownloads();
+    const list: DownloadInfo[] = await NativeModule.listDownloads();
+    // REMOVING is an internal transient Media3 state, not a user-download state.
+    return list.filter((item) => item.state !== 'removing');
   },
 
   async getDownload(id: string): Promise<DownloadInfo | null> {
@@ -134,6 +174,33 @@ export const IcareOfflineDrm = {
     return NativeModule.getStorageStats();
   },
 
+  async getDeviceStorageStats(): Promise<DeviceStorageStats> {
+    if (Platform.OS !== 'android') return { totalBytes: 0, freeBytes: 0, usedBytes: 0 };
+    return NativeDownloadManager.getDeviceStorageStats();
+  },
+
+  async setDownloadEntitlement(params: {
+    id: string;
+    courseId?: string | null;
+    chapterId?: string | null;
+    accessExpiresAt?: string | null;
+  }): Promise<void> {
+    if (Platform.OS !== 'android') return;
+    await NativeDownloadManager.setEntitlement(
+      params.id,
+      params.courseId ?? '',
+      params.chapterId ?? params.id,
+      params.accessExpiresAt ?? null,
+    );
+  },
+
+  async getDownloadEntitlement(id: string): Promise<DownloadEntitlement | null> {
+    if (Platform.OS !== 'android') return null;
+    const value = await NativeDownloadManager.getEntitlement(id);
+    if (!value || (!value.courseId && !value.chapterId && !value.accessExpiresAt)) return null;
+    return value as DownloadEntitlement;
+  },
+
   /**
    * Persist the learner's ordered three-language contract in native storage.
    * This does not alter download selection; the offline player uses it only
@@ -151,6 +218,18 @@ export const IcareOfflineDrm = {
 
   async launchOfflinePlayer(id: string): Promise<void> {
     ensureAndroid('launchOfflinePlayer');
+
+    // New downloads carry the authoritative Base44 course-entitlement expiry.
+    // Legacy downloads have no entitlement metadata and remain backward-compatible.
+    const entitlement = await this.getDownloadEntitlement(id);
+    const expiresAt = entitlement?.accessExpiresAt
+      ? new Date(entitlement.accessExpiresAt).getTime()
+      : Number.NaN;
+    if (Number.isFinite(expiresAt) && Date.now() >= expiresAt) {
+      try { await this.removeDownload(id); } catch { /* playback still stays blocked */ }
+      throw new Error('Course access has expired. This offline download is no longer available.');
+    }
+
     await refreshNativeLanguagePreferences();
     return NativeModule.launchOfflinePlayer(id);
   },
@@ -171,7 +250,12 @@ export function onDownloadProgress(
   listener: (e: DownloadProgressEvent) => void
 ) {
   if (!emitter) return { remove: () => {} };
-  return emitter.addListener('onDownloadProgress', listener);
+  return emitter.addListener('onDownloadProgress', (event) => {
+    // REMOVING is a transient implementation state. Suppressing it prevents the
+    // Downloads screen from flashing a deleted completed item under "Downloading".
+    if (event.state === 'removing') return;
+    listener(event);
+  });
 }
 
 export default IcareOfflineDrm;
