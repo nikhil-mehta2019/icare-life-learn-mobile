@@ -54,6 +54,8 @@ class OfflinePlayerActivity : Activity() {
     private var captionChoices: List<TrackChoice> = emptyList()
     private var preferredCodes: List<String> = emptyList()
     private var initialPreferencesApplied = false
+    private var selectedAudioKey: String? = null
+    private var selectedCaptionKey: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -117,9 +119,6 @@ class OfflinePlayerActivity : Activity() {
         closeBtn.setOnClickListener { finish() }
         root.addView(closeBtn)
 
-        // Keep the control identity permanently visible. Previously both controls
-        // replaced their whole label with the selected language, producing the
-        // ambiguous "English  English" UI seen on device.
         val audioBtn = makeTopControl("AUDIO TRACK", "Audio", 136, 220)
         audioBtn.setOnClickListener { showAudioChooser() }
         audioButton = audioBtn
@@ -253,7 +252,7 @@ class OfflinePlayerActivity : Activity() {
 
     private fun setControlText(button: TextView, label: String, value: String) {
         val visibleValue = shortLabel(value)
-        button.text = "$label\n$visibleValue"
+        button.text = "$label  ▾\n$visibleValue"
         button.contentDescription = "$label, $value. Double tap to change."
     }
 
@@ -279,22 +278,15 @@ class OfflinePlayerActivity : Activity() {
                 when (group.type) {
                     C.TRACK_TYPE_AUDIO -> {
                         val current = audioByLanguage[languageKey]
-                        if (current == null || candidate.bitrate > current.bitrate) {
-                            audioByLanguage[languageKey] = candidate
-                        }
+                        if (current == null || candidate.bitrate > current.bitrate) audioByLanguage[languageKey] = candidate
                     }
-                    C.TRACK_TYPE_TEXT -> {
-                        if (!captionsByLanguage.containsKey(languageKey)) {
-                            captionsByLanguage[languageKey] = candidate
-                        }
-                    }
+                    C.TRACK_TYPE_TEXT -> if (!captionsByLanguage.containsKey(languageKey)) captionsByLanguage[languageKey] = candidate
                 }
             }
         }
 
         audioChoices = orderAndFilter(audioByLanguage)
         captionChoices = orderAndFilter(captionsByLanguage)
-
         audioButton?.visibility = if (audioChoices.isNotEmpty()) View.VISIBLE else View.GONE
         captionButton?.visibility = if (captionChoices.isNotEmpty()) View.VISIBLE else View.GONE
 
@@ -318,6 +310,7 @@ class OfflinePlayerActivity : Activity() {
 
         audioChoices.firstOrNull()?.let { choice ->
             builder.addOverride(TrackSelectionOverride(choice.group, listOf(choice.trackIndex)))
+            selectedAudioKey = choice.key
             audioButton?.let { setControlText(it, "AUDIO TRACK", choice.label) }
             Log.d(TAG, "initial audio=${choice.label} key=${choice.key}")
         }
@@ -327,10 +320,12 @@ class OfflinePlayerActivity : Activity() {
             builder
                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
                 .addOverride(TrackSelectionOverride(initialCaption.group, listOf(initialCaption.trackIndex)))
+            selectedCaptionKey = initialCaption.key
             captionButton?.let { setControlText(it, "CC · SUBTITLES", initialCaption.label) }
             Log.d(TAG, "initial captions=${initialCaption.label} key=${initialCaption.key}")
         } else {
             builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+            selectedCaptionKey = null
             captionButton?.let { setControlText(it, "CC · SUBTITLES", "Off") }
             Log.d(TAG, "initial captions=OFF — no preferred caption available")
         }
@@ -353,15 +348,17 @@ class OfflinePlayerActivity : Activity() {
         val choices = audioChoices
         if (choices.isEmpty()) return
         val labels = choices.map { it.label }.toTypedArray()
+        val checkedIndex = choices.indexOfFirst { it.key == selectedAudioKey }.coerceAtLeast(0)
         AlertDialog.Builder(this)
             .setTitle("Audio track")
-            .setSingleChoiceItems(labels, -1) { dialog, which ->
+            .setSingleChoiceItems(labels, checkedIndex) { dialog, which ->
                 val currentPlayer = player ?: return@setSingleChoiceItems
                 val choice = choices[which]
                 val builder = currentPlayer.trackSelectionParameters.buildUpon()
                     .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
                     .addOverride(TrackSelectionOverride(choice.group, listOf(choice.trackIndex)))
                 currentPlayer.trackSelectionParameters = builder.build()
+                selectedAudioKey = choice.key
                 audioButton?.let { setControlText(it, "AUDIO TRACK", choice.label) }
                 Log.d(TAG, "audio selected=${choice.label} key=${choice.key} bitrate=${choice.bitrate}")
                 dialog.dismiss()
@@ -374,14 +371,16 @@ class OfflinePlayerActivity : Activity() {
         val choices = captionChoices
         if (choices.isEmpty()) return
         val labels = arrayOf("Off", *choices.map { it.label }.toTypedArray())
+        val selectedIndex = selectedCaptionKey?.let { key -> choices.indexOfFirst { it.key == key }.takeIf { it >= 0 }?.plus(1) } ?: 0
         AlertDialog.Builder(this)
             .setTitle("Subtitles (CC)")
-            .setSingleChoiceItems(labels, -1) { dialog, which ->
+            .setSingleChoiceItems(labels, selectedIndex) { dialog, which ->
                 val currentPlayer = player ?: return@setSingleChoiceItems
                 val builder = currentPlayer.trackSelectionParameters.buildUpon()
                     .clearOverridesOfType(C.TRACK_TYPE_TEXT)
                 if (which == 0) {
                     builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                    selectedCaptionKey = null
                     captionButton?.let { setControlText(it, "CC · SUBTITLES", "Off") }
                     Log.d(TAG, "captions selected=OFF")
                 } else {
@@ -389,6 +388,7 @@ class OfflinePlayerActivity : Activity() {
                     builder
                         .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
                         .addOverride(TrackSelectionOverride(choice.group, listOf(choice.trackIndex)))
+                    selectedCaptionKey = choice.key
                     captionButton?.let { setControlText(it, "CC · SUBTITLES", choice.label) }
                     Log.d(TAG, "captions selected=${choice.label} key=${choice.key}")
                 }
@@ -409,6 +409,8 @@ class OfflinePlayerActivity : Activity() {
         player = null
         audioChoices = emptyList()
         captionChoices = emptyList()
+        selectedAudioKey = null
+        selectedCaptionKey = null
         audioButton = null
         captionButton = null
     }
