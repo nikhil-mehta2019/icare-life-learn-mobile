@@ -1,13 +1,8 @@
 // SECURITY NOTE: API_KEY is bundled into the APK. Before production release,
 // move this to a runtime config fetched after auth, or use per-user signed
 // tokens served by a Base44 backend function.
-//
-// API_KEY and BASE_URL are exported so explore.tsx can inject them into the
-// WebView at runtime (via injectJavaScript) rather than embedding them in the
-// static injectedJavaScriptBeforeContentLoaded string.  This keeps them out of
-// the easily-readable static bundle text in the APK, though they remain in the
-// compiled JS bundle — a proper secrets-management solution (env var at build
-// time, or a post-auth token endpoint) is the long-term fix.
+
+import IcareOfflineDrm from '../modules/icare-offline-drm';
 
 export const BASE_URL = 'https://icare-life-learn.base44.app/api';
 export const API_KEY = '6af260f41e2140b9950788621360c5cf';
@@ -19,8 +14,6 @@ const defaultHeaders: Record<string, string> = {
   'Content-Type': 'application/json',
   'api_key': API_KEY,
 };
-
-// ─── Entity Types ──────────────────────────────────────────────────────────────
 
 export interface Course {
   id: string;
@@ -78,15 +71,14 @@ export interface Chapter {
   description?: string;
   contentType?: 'video' | 'ispring' | 'pdf' | 'resource';
   muxAssetId?: string;
-  // ─ Playback IDs — use selectMuxPlaybackId() to choose the right one ─
-  muxPlaybackId?: string;           // public (unsigned)
-  muxSignedPlaybackId?: string;     // signed/token-protected streams
-  muxDrmPlaybackId?: string;        // Widevine DRM streams
+  muxPlaybackId?: string;
+  muxSignedPlaybackId?: string;
+  muxDrmPlaybackId?: string;
   muxSignedPlaybackRequired?: boolean;
   muxDrmProtected?: boolean;
   videoPosterUrl?: string;
   ispringUrl?: string;
-  ispringUrlsJson?: string;         // JSON string: [{language, url}]
+  ispringUrlsJson?: string;
   slidesUrl?: string;
   resourceUrl?: string;
   textContent?: string;
@@ -106,20 +98,20 @@ export interface MuxTokenResponse {
   secureStreamUrl: string;
 }
 
-/** Response from getMuxDownloadToken() — used exclusively for offline downloads. */
 export interface MuxDownloadTokenResponse {
   drmEnabled: boolean;
   manifestUrl: string;
   drmToken: string | null;
   widevineLicenseUrl: string | null;
-  /** Audio language codes available for this video (e.g. ["en", "es"]). */
   audioLanguages: string[];
-  /** Caption/subtitle language codes available for this video. */
   captionLanguages: string[];
 }
 
 export interface UserPreferences {
+  preferredLanguages: string[];
+  primaryLanguage: string | null;
   preferredLanguage: string | null;
+  isComplete: boolean;
 }
 
 export interface StudentAccessResponse {
@@ -128,8 +120,6 @@ export interface StudentAccessResponse {
   courseAccessExpiresAt?: string;
   isOnTrial?: boolean;
 }
-
-// ─── Internal HTTP helpers ─────────────────────────────────────────────────────
 
 async function apiGet<T>(path: string): Promise<{ status: number; data: T }> {
   const response = await fetch(`${BASE_URL}${path}`, { headers: defaultHeaders });
@@ -155,9 +145,6 @@ async function apiPost<T>(
   return data as T;
 }
 
-// ─── Course ────────────────────────────────────────────────────────────────────
-
-/** Fetch published courses visible in the catalog. */
 export async function fetchCourses(
   filter?: object,
   limit = 50
@@ -175,8 +162,6 @@ export async function fetchCourse(
   return apiGet<Course>(`/entities/Course/${courseId}`);
 }
 
-// ─── Module ────────────────────────────────────────────────────────────────────
-
 export async function fetchModules(courseId: string): Promise<Module[]> {
   const q = encodeURIComponent(JSON.stringify({ courseId, status: 'published' }));
   const { data } = await apiGet<Module[]>(
@@ -190,8 +175,6 @@ export async function fetchModule(
 ): Promise<{ status: number; data: Module }> {
   return apiGet<Module>(`/entities/Module/${moduleId}`);
 }
-
-// ─── Chapter ───────────────────────────────────────────────────────────────────
 
 export async function fetchChapters(moduleId: string): Promise<Chapter[]> {
   const q = encodeURIComponent(JSON.stringify({ moduleId, status: 'published' }));
@@ -207,15 +190,6 @@ export async function fetchChapter(
   return apiGet<Chapter>(`/entities/Chapter/${chapterId}`);
 }
 
-/**
- * Pick the correct Mux playback ID for token generation.
- *
- * Priority:  DRM playback ID  >  Signed playback ID  >  Public playback ID
- *
- * This matters because getMuxToken() issues different tokens based on the
- * type of playback ID passed. Passing the wrong ID will result in either
- * an unsigned stream or a failed DRM license acquisition.
- */
 export function selectMuxPlaybackId(chapter: Chapter): string | null {
   if (chapter.muxDrmProtected && chapter.muxDrmPlaybackId) {
     return chapter.muxDrmPlaybackId;
@@ -226,24 +200,10 @@ export function selectMuxPlaybackId(chapter: Chapter): string | null {
   return chapter.muxPlaybackId ?? null;
 }
 
-// ─── Backend Functions ─────────────────────────────────────────────────────────
-
-/**
- * Get Mux signed tokens for playback.
- * Always call selectMuxPlaybackId() first to pick the right playback ID.
- * Returns: { token, drmToken, drmLicenseUrl, secureStreamUrl }
- */
 export async function getMuxToken(playbackId: string): Promise<MuxTokenResponse> {
   return apiPost<MuxTokenResponse>('/functions/getMuxToken', { playbackId }, true);
 }
 
-/**
- * Get Mux offline download tokens for a chapter.
- * Calls /functions/getMuxDownloadToken → iCare play API /download endpoint.
- * Returns a DRM manifest URL + persistent Widevine license token for DRM chapters,
- * or a plain manifest URL for signed-only chapters.
- * NEVER used for online streaming — online playback always uses getMuxToken().
- */
 export async function getMuxDownloadToken(
   playbackId: string,
   _jwt?: string
@@ -267,9 +227,26 @@ export async function getMuxDownloadToken(
   };
 }
 
+function normalizePreferenceCodes(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of value) {
+    const code = String(item || '').trim().toLowerCase();
+    if (!code || seen.has(code)) continue;
+    seen.add(code);
+    out.push(code);
+    if (out.length === 3) break;
+  }
+  return out;
+}
+
 /**
- * Get the authenticated user's preferences (currently just preferredLanguage)
- * from the Base44 backend function getMyPreferences.
+ * Get the authenticated learner's ordered three-language contract.
+ * The primary/legacy preferredLanguage remains available for old call sites.
+ * On Android the full trio is also persisted into the native module so the
+ * offline player can apply the same visibility/order/default rules without
+ * performing its own Base44 authentication.
  */
 export async function fetchUserPreferences(jwt: string): Promise<UserPreferences> {
   const response = await fetch(`${BASE_URL}/functions/getMyPreferences`, {
@@ -281,16 +258,31 @@ export async function fetchUserPreferences(jwt: string): Promise<UserPreferences
   if (!response.ok) {
     throw new Error((data as any)?.error ?? `getMyPreferences failed (${response.status})`);
   }
+
   const d = data as any;
-  const pref =
-    d?.preferredLanguage ?? d?.preferred_language ?? d?.data?.preferredLanguage ?? d?.user?.preferredLanguage ?? null;
-  return { preferredLanguage: pref ? String(pref).toLowerCase() : null };
+  const rawOrdered =
+    d?.preferredLanguages ?? d?.data?.preferredLanguages ?? d?.user?.preferredLanguages ?? [];
+  let preferredLanguages = normalizePreferenceCodes(rawOrdered);
+  const legacy =
+    d?.primaryLanguage ?? d?.preferredLanguage ?? d?.preferred_language ??
+    d?.data?.preferredLanguage ?? d?.user?.preferredLanguage ?? null;
+  const primaryLanguage = preferredLanguages[0] ?? (legacy ? String(legacy).toLowerCase() : null);
+  if (!preferredLanguages.length && primaryLanguage) preferredLanguages = [primaryLanguage];
+
+  try {
+    await IcareOfflineDrm.setPreferredLanguages(preferredLanguages);
+  } catch (error) {
+    console.warn('[base44Client] Could not persist native language preferences', error);
+  }
+
+  return {
+    preferredLanguages,
+    primaryLanguage,
+    preferredLanguage: primaryLanguage,
+    isComplete: preferredLanguages.length === 3,
+  };
 }
 
-/**
- * Get Mux tokens using an explicit auth JWT (bypasses WebView session cookies).
- * Used when the WebView is backgrounded and postMessage is suppressed by Android.
- */
 export async function getMuxTokenWithJwt(
   playbackId: string,
   jwt: string
@@ -310,10 +302,6 @@ export async function getMuxTokenWithJwt(
   return data as MuxTokenResponse;
 }
 
-/**
- * Resolve whether the authenticated student has access to a course.
- * Requires the student to be logged in via the WebView session cookie.
- */
 export async function resolveStudentAccess(
   courseId: string
 ): Promise<{ status: number; data: StudentAccessResponse }> {
@@ -327,9 +315,6 @@ export async function resolveStudentAccess(
   return { status: response.status, data };
 }
 
-// ─── Dev / connection test ──────────────────────────────────────────────────────
-
-/** Used only during development to verify connectivity. */
 export async function testConnection(): Promise<{ status: number; data: unknown }> {
   return apiGet('/entities/Course?limit=1');
 }
