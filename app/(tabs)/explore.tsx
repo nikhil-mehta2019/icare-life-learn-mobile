@@ -48,11 +48,11 @@
 
 import { useRouter, type Href } from 'expo-router';
 import { useCallback, useEffect, useRef } from 'react';
-import { Alert, Platform, StyleSheet } from 'react-native';
+import { Platform, StyleSheet } from 'react-native';
 import { WebView, type WebViewMessageEvent } from 'react-native-webview';
 import type { ShouldStartLoadRequest } from 'react-native-webview/lib/WebViewTypes';
 import { deliverPlayerData, deliverPlayerError } from '../../api/playerCache';
-import { API_KEY, BASE_URL, fetchUserPreferences } from '../../api/base44Client';
+import { API_KEY, BASE_URL } from '../../api/base44Client';
 import IcareOfflineDrm from '../../modules/icare-offline-drm';
 
 const BASE44_URL = 'https://icare-life-learn.base44.app';
@@ -476,63 +476,12 @@ const INJECTED_JS = `
     }
   };
 
-  function _showDownloadBtn(chapterId) {
-    if (_dlBtn) {
-      // Navigated to a different chapter — reset the button and re-check state.
-      _dlBtn.dataset.cid = chapterId;
-      _dlChapterId = chapterId;
-      _dlState = null;
-      _dlInProgress = false;
-      _dlBtn.textContent = '⬇ Download';
-      _dlBtn.style.background = '#1D3D47';
-      _dlBtn.style.opacity = '1';
-      _postMessage({ type: 'CHECK_DOWNLOAD_STATUS', chapterId: chapterId });
-      return;
-    }
-    var btn = document.createElement('button');
-    btn.id = '__icare_dl_btn';
-    btn.dataset.cid = chapterId;
-    btn.textContent = '⬇ Download';
-    btn.style.cssText = [
-      'position:fixed',
-      'bottom:72px',
-      'right:16px',
-      'z-index:2147483647',
-      'background:#1D3D47',
-      'color:#fff',
-      'border:none',
-      'border-radius:22px',
-      'padding:10px 18px',
-      'font-size:14px',
-      'font-weight:600',
-      'box-shadow:0 2px 8px rgba(0,0,0,0.35)',
-      'cursor:pointer',
-      'display:flex',
-      'align-items:center',
-      'gap:6px',
-      'font-family:system-ui,sans-serif',
-      'letter-spacing:0.2px',
-    ].join(';');
-    btn.addEventListener('click', function() {
-      // Chapter already downloaded or queued — open Downloads tab instead.
-      if (_dlState === 'completed' || _dlState === 'downloading' || _dlState === 'queued') {
-        _postMessage({ type: 'GO_TO_DOWNLOADS' });
-        return;
-      }
-      if (_dlInProgress) return;
-      var cid = btn.dataset.cid;
-      if (!cid) return;
-      _dlInProgress = true;
-      btn.textContent = '⏳ Preparing…';
-      btn.style.opacity = '0.75';
-      _doDownloadFetch(cid, btn);
-    });
-    document.body.appendChild(btn);
-    _dlBtn = btn;
-    _dlChapterId = chapterId;
-    // Ask native side for current download state so the button is correct immediately.
-    _postMessage({ type: 'CHECK_DOWNLOAD_STATUS', chapterId: chapterId });
-  }
+  // The floating individual-chapter download button has been removed. The
+  // single supported download journey is now My Downloads → Add Downloads,
+  // which offers multi-video/module selection, storage estimates, and proper
+  // download management. This is now a no-op, kept so existing call sites
+  // (checkUrl, _doFetchTokens) don't need to be touched.
+  function _showDownloadBtn(chapterId) {}
 
   function _hideDownloadBtn() {
     if (_dlBtn) { _dlBtn.remove(); _dlBtn = null; }
@@ -545,68 +494,6 @@ const INJECTED_JS = `
     _dlInProgress = false;
     _dlState = null;
     if (_dlBtn) { _dlBtn.textContent = '⬇ Download'; _dlBtn.style.background = '#1D3D47'; _dlBtn.style.opacity = '1'; }
-  }
-
-  // Separate fetch path for download — posts DOWNLOAD_CHAPTER (not OPEN_CHAPTER).
-  // Uses /functions/getMuxDownloadToken → iCare /download endpoint so that
-  // DRM chapters receive a manifest URL with Widevine PSSH and a persistent
-  // offline license token (drm_offline=true), not the signed streaming manifest.
-  function _doDownloadFetch(chapterId, btn) {
-    var key = _apiKey;
-    var api = _baseApi;
-    var hdrs = { 'Content-Type': 'application/json', 'api_key': key };
-
-    fetchJsonWithTimeout('Chapter fetch', api + '/entities/Chapter/' + chapterId,
-          { headers: hdrs, credentials: 'include' }, FETCH_TIMEOUT_MS)
-      .then(function(r) {
-        if (!r.ok) throw new Error('Chapter fetch failed (' + r.status + ')');
-        return r.json();
-      })
-      .then(function(chapter) {
-        var playbackId =
-          (chapter.muxDrmProtected && chapter.muxDrmPlaybackId)
-            ? chapter.muxDrmPlaybackId
-          : (chapter.muxSignedPlaybackRequired && chapter.muxSignedPlaybackId)
-            ? chapter.muxSignedPlaybackId
-          : (chapter.muxPlaybackId || null);
-        if (!playbackId) {
-          _muxChapterIds[chapterId] = false;
-          _hideDownloadBtn();
-          return; // Not a video chapter — silently ignore download attempt.
-        }
-
-        // Delegate token fetch to native side (HTTP not allowed from WebView).
-        var reqId = 'dl_' + Date.now() + '_' + Math.random().toString(36).slice(2);
-        var capturedChapter = chapter;
-        return new Promise(function(resolve, reject) {
-          var timer = setTimeout(function() {
-            delete window.__icare_downloadTokenReady[reqId];
-            reject(new Error('Download token fetch timed out'));
-          }, FETCH_TIMEOUT_MS);
-          if (!window.__icare_downloadTokenReady) window.__icare_downloadTokenReady = {};
-          window.__icare_downloadTokenReady[reqId] = function(err, dlTokens) {
-            clearTimeout(timer);
-            delete window.__icare_downloadTokenReady[reqId];
-            if (err) { reject(new Error(err)); return; }
-            log('info', '[OFFLINE-DRM] playbackId=' + playbackId
-              + ' drmEnabled=' + dlTokens.drmEnabled
-              + ' manifestUrl=' + (dlTokens.manifestUrl || 'null')
-              + ' widevineLicenseUrl=' + (dlTokens.widevineLicenseUrl || 'null'));
-            _postMessage({ type: 'DOWNLOAD_CHAPTER', chapterId: chapterId,
-                           chapter: capturedChapter, dlTokens: dlTokens });
-            if (btn) { btn.textContent = '✓ Queued'; btn.style.background = '#2e7d32'; }
-            setTimeout(function() { _resetDownloadBtn(); }, 3000);
-            resolve(undefined);
-          };
-          _postMessage({ type: 'GET_DOWNLOAD_TOKEN', playbackId: playbackId, reqId: reqId });
-        });
-      })
-      .catch(function(err) {
-        log('error', 'Download fetch failed: ' + String(err));
-        _postMessage({ type: 'DOWNLOAD_ERROR', chapterId: chapterId, error: String(err) });
-        if (btn) { btn.textContent = '✗ Failed'; btn.style.background = '#b71c1c'; }
-        setTimeout(function() { _resetDownloadBtn(); }, 3000);
-      });
   }
 
   // ── SPA navigation monitor ────────────────────────────────────────────────
@@ -843,128 +730,6 @@ export default function ExploreScreen() {
           console.warn(`[explore] CHAPTER_ERROR for chapter ${chapterId}: ${msg.error}`);
           deliverPlayerError(chapterId, String(msg.error ?? 'Unknown error from WebView bridge'));
           break;
-
-        case 'DOWNLOAD_CHAPTER': {
-          if (!chapterId) {
-            console.warn('[explore] DOWNLOAD_CHAPTER received without chapterId — ignored');
-            break;
-          }
-          const dlChapter = msg.chapter as any;
-          const dlTokens  = msg.dlTokens  as any;
-          console.log(`[explore] DOWNLOAD_CHAPTER — starting offline download for chapter ${chapterId} drmEnabled=${dlTokens?.drmEnabled}`);
-          // Base44 Chapter entity uses 'title'; fall back through 'name' / 'label'
-          // before using the raw ID. Log the chapter object to diagnose field names.
-          console.log(`[explore] DOWNLOAD_CHAPTER chapter fields: ${JSON.stringify(Object.keys(dlChapter ?? {}))}`);
-          console.log(`[explore] DOWNLOAD_CHAPTER chapter.title=${dlChapter?.title} chapter.name=${dlChapter?.name}`);
-          const chapterTitle: string =
-            dlChapter?.title || dlChapter?.name || dlChapter?.label || chapterId;
-          const thumbnailUrl: string | undefined =
-            dlChapter?.videoPosterUrl || dlChapter?.thumbnailUrl || dlChapter?.posterUrl || undefined;
-          const durationSeconds: number | undefined =
-            dlChapter?.estimatedMinutes
-              ? Math.round(dlChapter.estimatedMinutes * 60)
-              : undefined;
-
-          (async () => {
-            // Limit the download to the user's preferred language + English
-            // (audio + captions). Falls back to downloading all available
-            // languages if preferences can't be fetched. Mirrors the same
-            // logic in app/player/[chapterId].tsx's handleDownload.
-            let downloadAudioLanguages: string[] | undefined;
-            let downloadCaptionLanguages: string[] | undefined;
-            try {
-              const jwt = getAuthJwt();
-              const prefs = jwt ? await fetchUserPreferences(jwt) : null;
-              const norm = (s: string) => s.toLowerCase().split(/[-_]/)[0];
-              const alias: Record<string, string> = { spa: 'es', eng: 'en', swa: 'sw', hin: 'hi', mar: 'mr', guj: 'gu' };
-              const toBase = (s: string) => {
-                const b = norm(s);
-                return b.length === 2 ? b : (alias[b] ?? b.slice(0, 2));
-              };
-              const wantBases = new Set(
-                [prefs?.preferredLanguage, 'en'].filter(Boolean).map((s) => toBase(String(s)))
-              );
-              const availAudio: string[] = dlTokens.audioLanguages ?? [];
-              const availCap: string[] = dlTokens.captionLanguages ?? [];
-              let matchedAudio = availAudio.filter((l: string) => wantBases.has(toBase(l)));
-              let matchedCap = availCap.filter((l: string) => wantBases.has(toBase(l)));
-              downloadAudioLanguages = matchedAudio.length
-                ? matchedAudio
-                : (availAudio.length ? undefined : Array.from(wantBases));
-              downloadCaptionLanguages = matchedCap.length ? matchedCap : undefined;
-              console.log(
-                '[explore] download langs — audio:', downloadAudioLanguages,
-                'caption:', downloadCaptionLanguages,
-              );
-            } catch (e) {
-              console.warn('[explore] preferred-language fetch failed; downloading all languages', e);
-            }
-
-            try {
-              await IcareOfflineDrm.startDownload({
-                id:            chapterId,
-                manifestUrl:   dlTokens.manifestUrl,
-                drmLicenseUrl: dlTokens.widevineLicenseUrl ?? '',
-                drmToken:      dlTokens.drmToken ?? '',
-                title:         chapterTitle,
-                thumbnailUrl,
-                durationSeconds,
-                audioLanguages:   downloadAudioLanguages,
-                captionLanguages: downloadCaptionLanguages,
-              });
-            } catch (err: any) {
-              console.error(`[explore] Download failed for chapter ${chapterId}:`, err);
-              Alert.alert('Download failed', err?.message ?? String(err));
-            }
-          })();
-          break;
-        }
-
-        case 'DOWNLOAD_ERROR':
-          if (!chapterId) break;
-          console.warn(`[explore] DOWNLOAD_ERROR for chapter ${chapterId}: ${msg.error}`);
-          Alert.alert('Download failed', String(msg.error ?? 'Could not fetch tokens for download'));
-          break;
-
-        case 'GET_DOWNLOAD_TOKEN': {
-          // WebView JS can't hit HTTP endpoints — delegate to native fetch.
-          const playbackId = msg.playbackId as string;
-          const reqId = msg.reqId as string;
-          console.log(`[explore] GET_DOWNLOAD_TOKEN received — playbackId=${playbackId} reqId=${reqId}`);
-          if (!playbackId || !reqId) {
-            console.warn('[explore] GET_DOWNLOAD_TOKEN missing playbackId/reqId — ignored');
-            break;
-          }
-          const dlUrl = `http://35.154.164.178:8000/videos/by-mux-id/${encodeURIComponent(playbackId)}/download`;
-          console.log(`[explore] GET_DOWNLOAD_TOKEN fetching: ${dlUrl}`);
-          fetch(
-            dlUrl,
-            { headers: { 'X-API-Key': 'sk_icare_1b75de18308eb135e2df9ef29aef825266eea22041f8e4a9' } }
-          ).then(async (r) => {
-            console.log(`[explore] GET_DOWNLOAD_TOKEN response status=${r.status}`);
-            const data = await r.json();
-            if (!r.ok) throw new Error(data?.detail ?? `Download token fetch failed (${r.status})`);
-            const offline = data.offline ?? {};
-            const dlTokens = {
-              drmEnabled: !!data.drm_enabled,
-              manifestUrl: offline.manifest_url ?? data.download_url ?? '',
-              drmToken: offline.drm_token ?? '',
-              widevineLicenseUrl: offline.widevine_license_url ?? '',
-              audioLanguages: data.audio_languages ?? [],
-              captionLanguages: data.caption_languages ?? [],
-            };
-            console.log(`[explore] GET_DOWNLOAD_TOKEN success — audioLanguages=${JSON.stringify(dlTokens.audioLanguages)} captionLanguages=${JSON.stringify(dlTokens.captionLanguages)}`);
-            webRef.current?.injectJavaScript(
-              `(window.__icare_downloadTokenReady||{})[${JSON.stringify(reqId)}]&&window.__icare_downloadTokenReady[${JSON.stringify(reqId)}](null,${JSON.stringify(dlTokens)}); true;`
-            );
-          }).catch((err: any) => {
-            console.error(`[explore] GET_DOWNLOAD_TOKEN fetch failed: ${err}`);
-            webRef.current?.injectJavaScript(
-              `(window.__icare_downloadTokenReady||{})[${JSON.stringify(reqId)}]&&window.__icare_downloadTokenReady[${JSON.stringify(reqId)}](${JSON.stringify(String(err))},null); true;`
-            );
-          });
-          break;
-        }
 
         case 'CHECK_DOWNLOAD_STATUS':
           // WebView is asking whether this chapter is already downloaded.

@@ -113,7 +113,6 @@ export interface UserPreferences {
   preferredLanguages: string[];
   primaryLanguage: string | null;
   preferredLanguage: string | null;
-  isComplete: boolean;
 }
 
 export interface StudentAccessResponse {
@@ -233,6 +232,10 @@ export async function getMuxDownloadToken(
   const data = await response.json().catch(() => ({} as any));
   if (!response.ok) {
     const code = (data as any)?.error ?? `Download authorization failed (${response.status})`;
+    console.warn(
+      `[base44Client] getMuxDownloadToken denied — playbackId=${playbackId} status=${response.status} ` +
+      `code=${code} jwtLen=${jwt.length} body=${JSON.stringify(data).slice(0, 300)}`
+    );
     if (code === 'no_course_access') {
       throw new Error('Your access to this course has expired or is no longer active.');
     }
@@ -327,7 +330,6 @@ export async function fetchUserPreferences(jwt: string): Promise<UserPreferences
     preferredLanguages,
     primaryLanguage,
     preferredLanguage: primaryLanguage,
-    isComplete: preferredLanguages.length === 3,
   };
 }
 

@@ -17,7 +17,6 @@
 console.log('[build] iCare player offline-learning-center active');
 
 import { useIsFocused } from 'expo-router';
-import * as FileSystem from 'expo-file-system';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { getItemAsync, setItemAsync } from 'expo-secure-store';
@@ -41,8 +40,6 @@ import {
   fetchChapter,
   selectMuxPlaybackId,
   getMuxTokenWithJwt,
-  getMuxDownloadToken,
-  fetchUserPreferences,
 } from '../../api/base44Client';
 import { waitForPlayerData, type BridgeResult } from '../../api/playerCache';
 import { requestWebViewTokens, getAuthJwt } from '../(tabs)/explore';
@@ -154,7 +151,6 @@ interface VideoPlayerProps {
   chapterId: string;
   initialPositionSeconds: number;
   isDownloadPending: boolean;
-  onDownload: () => void;
   onDelete: () => void;
   onGoToDownloads: () => void;
   onRenewLicense: () => void;
@@ -170,7 +166,6 @@ function VideoPlayer({
   chapterId,
   initialPositionSeconds,
   isDownloadPending,
-  onDownload,
   onDelete,
   onGoToDownloads,
   onRenewLicense,
@@ -324,7 +319,6 @@ function VideoPlayer({
           offline={!!offline}
           offlineDownload={download}
           isDownloadPending={isDownloadPending}
-          onDownload={onDownload}
           onDelete={onDelete}
           onGoToDownloads={onGoToDownloads}
           onRenewLicense={onRenewLicense}
@@ -543,105 +537,6 @@ export default function ChapterPlayerScreen() {
     return result.data.tokens;
   }, [tokens, chapterId]);
 
-  // ── download handler ──
-  const handleDownload = useCallback(async () => {
-    if (!chapter || !chapterId) return;
-    if (isDownloadPending) return;
-
-    setIsDownloadPending(true);
-    try {
-      // Storage pre-check: require at least 500 MB free before starting.
-      const MIN_FREE_BYTES = 500 * 1024 * 1024;
-      try {
-        const free = await FileSystem.getFreeDiskStorageAsync();
-        if (typeof free === 'number' && free < MIN_FREE_BYTES) {
-          const freeMb = Math.round(free / (1024 * 1024));
-          Alert.alert(
-            'Not enough storage',
-            `Only ${freeMb} MB available. Please free up at least 500 MB and try again.`,
-          );
-          return;
-        }
-      } catch {
-        // Storage check failed — proceed anyway, ExoPlayer will catch a full disk.
-      }
-
-      // Offline download always uses the /download endpoint so DRM chapters receive
-      // a Widevine-PSSH-bearing manifest and a persistent offline license token.
-      // selectMuxPlaybackId() picks DRM > Signed > Public — same priority as streaming.
-      const playbackId = selectMuxPlaybackId(chapter);
-      if (!playbackId) {
-        Alert.alert('Download failed', 'Chapter has no Mux playback ID.');
-        return;
-      }
-
-      const jwt = getAuthJwt();
-      const dlTokens = await getMuxDownloadToken(playbackId, jwt ?? undefined);
-
-      console.log(
-        `[OFFLINE-DRM]\nchapterId=${chapterId}\nplaybackId=${playbackId}` +
-        `\nmanifestUrl=${dlTokens.manifestUrl ?? 'null'}` +
-        `\ndrmLicenseUrl=${dlTokens.widevineLicenseUrl ?? 'null'}` +
-        `\ndrmTokenPresent=${!!dlTokens.drmToken}`
-      );
-
-      if (!dlTokens.manifestUrl) {
-        Alert.alert('Download failed', 'Could not resolve manifest URL for this chapter.');
-        return;
-      }
-
-      // Limit the download to the user's preferred language + English (audio + captions).
-      // Falls back to downloading all available languages if preferences can't be fetched.
-      let downloadAudioLanguages: string[] | undefined;
-      let downloadCaptionLanguages: string[] | undefined;
-      try {
-        const prefs = jwt ? await fetchUserPreferences(jwt) : null;
-        const norm = (s: string) => s.toLowerCase().split(/[-_]/)[0];
-        const alias: Record<string, string> = { spa: 'es', eng: 'en', swa: 'sw', hin: 'hi', mar: 'mr', guj: 'gu' };
-        const toBase = (s: string) => {
-          const b = norm(s);
-          return b.length === 2 ? b : (alias[b] ?? b.slice(0, 2));
-        };
-        const wantBases = new Set(
-          [prefs?.preferredLanguage, 'en'].filter(Boolean).map((s) => toBase(String(s)))
-        );
-        const availAudio = dlTokens.audioLanguages ?? [];
-        const availCap = dlTokens.captionLanguages ?? [];
-        downloadAudioLanguages = availAudio.filter((l) => wantBases.has(toBase(l)));
-        downloadCaptionLanguages = availCap.filter((l) => wantBases.has(toBase(l)));
-        if (!downloadAudioLanguages.length) {
-          downloadAudioLanguages = availAudio.length ? undefined : Array.from(wantBases);
-        }
-        if (!downloadCaptionLanguages.length) downloadCaptionLanguages = undefined;
-        console.log(
-          '[player] download langs — audio:', downloadAudioLanguages,
-          'caption:', downloadCaptionLanguages,
-        );
-      } catch (e) {
-        console.warn('[player] preferred-language fetch failed; downloading all languages', e);
-      }
-
-      await IcareOfflineDrm.startDownload({
-        id:            chapterId,
-        manifestUrl:   dlTokens.manifestUrl,
-        drmLicenseUrl: dlTokens.widevineLicenseUrl ?? '',
-        drmToken:      dlTokens.drmToken ?? '',
-        title:         chapter.title,
-        thumbnailUrl:  (chapter as any).videoPosterUrl ?? undefined,
-        durationSeconds: (chapter as any).estimatedMinutes
-          ? Math.round((chapter as any).estimatedMinutes * 60)
-          : undefined,
-        audioLanguages:   downloadAudioLanguages,
-        captionLanguages: downloadCaptionLanguages,
-      });
-    } catch (err: any) {
-      console.error(`[player] handleDownload: FAILED — ${err?.message}`);
-      Alert.alert('Download failed', err?.message ?? String(err));
-    } finally {
-      setIsDownloadPending(false);
-    }
-  }, [chapter, chapterId, isDownloadPending]);
-
   // ── delete-download handler ──
   // Uses resolveTokens() so the fast-path (tokens already in state) is taken
   // on Android, where the backgrounded WebView postMessage bridge is unreliable.
@@ -745,7 +640,6 @@ export default function ChapterPlayerScreen() {
             offline={false}
             offlineDownload={download}
             isDownloadPending={isDownloadPending}
-            onDownload={handleDownload}
             onDelete={handleDeleteDownload}
             onGoToDownloads={handleGoToDownloads}
             onRenewLicense={handleRenewLicense}
@@ -804,7 +698,6 @@ export default function ChapterPlayerScreen() {
       chapterId={chapterId ?? ''}
       initialPositionSeconds={initialPositionSeconds}
       isDownloadPending={isDownloadPending}
-      onDownload={handleDownload}
       onDelete={handleDeleteDownload}
       onGoToDownloads={handleGoToDownloads}
       onRenewLicense={handleRenewLicense}
@@ -819,7 +712,6 @@ function DownloadControls({
   offline,
   offlineDownload,
   isDownloadPending,
-  onDownload,
   onDelete,
   onGoToDownloads,
   onRenewLicense,
@@ -828,7 +720,6 @@ function DownloadControls({
   offline: boolean;
   offlineDownload: DownloadInfo | null;
   isDownloadPending: boolean;
-  onDownload: () => void;
   onDelete: () => void;
   onGoToDownloads: () => void;
   onRenewLicense: () => void;
@@ -883,30 +774,19 @@ function DownloadControls({
     return (
       <View style={styles.actionRow}>
         <Text style={styles.error}>Download failed: {download.failureReason ?? 'unknown'}</Text>
-        <Pressable
-          style={[styles.btn, isDownloadPending && styles.btnDisabled]}
-          onPress={onDownload}
-          disabled={isDownloadPending}
-        >
-          <Text style={styles.btnText}>{isDownloadPending ? 'Starting…' : 'Retry'}</Text>
+        <Pressable style={[styles.btn, styles.btnSecondary]} onPress={onGoToDownloads}>
+          <Text style={[styles.btnText, { color: '#1D3D47' }]}>Go To Downloads</Text>
         </Pressable>
       </View>
     );
   }
 
-  return (
-    <View style={styles.actionRow}>
-      <Pressable
-        style={[styles.btn, styles.btnDownload, isDownloadPending && styles.btnDisabled]}
-        onPress={onDownload}
-        disabled={isDownloadPending}
-      >
-        <Text style={styles.btnText}>
-          {isDownloadPending ? '⏳  Preparing download…' : '⬇  Download for Offline Viewing'}
-        </Text>
-      </Pressable>
-    </View>
-  );
+  // The individual chapter Download button has been removed. The single
+  // supported download journey is now My Downloads → Add Downloads, which
+  // offers multi-video/module selection, storage estimates, and proper
+  // download management. Nothing renders here when the chapter isn't
+  // downloaded/downloading/failed.
+  return null;
 }
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
