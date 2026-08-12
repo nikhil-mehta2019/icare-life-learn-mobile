@@ -44,7 +44,7 @@ export async function queueChapterForOffline(chapter: Chapter, jwt: string): Pro
   if (!playbackId) throw new Error(`${chapter.title} has no downloadable video.`);
 
   const [tokens, preferences] = await Promise.all([
-    getMuxDownloadToken(playbackId, jwt),
+    getMuxDownloadToken(playbackId, jwt, chapter.courseId),
     fetchUserPreferences(jwt).catch(() => null),
   ]);
 

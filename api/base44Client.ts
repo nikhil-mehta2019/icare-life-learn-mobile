@@ -215,7 +215,8 @@ export async function getMuxToken(playbackId: string): Promise<MuxTokenResponse>
  */
 export async function getMuxDownloadToken(
   playbackId: string,
-  jwt?: string
+  jwt?: string,
+  courseId?: string
 ): Promise<MuxDownloadTokenResponse> {
   if (!jwt) {
     throw new Error('Your session must be refreshed before downloading. Please reconnect and try again.');
@@ -227,7 +228,10 @@ export async function getMuxDownloadToken(
       ...defaultHeaders,
       Authorization: `Bearer ${jwt}`,
     },
-    body: JSON.stringify({ playbackId }),
+    // courseId disambiguates chapters that share a playbackId across courses
+    // (e.g. the same Mux asset reused in two courses) so the server resolves
+    // access against the course the learner actually selected.
+    body: JSON.stringify(courseId ? { playbackId, courseId } : { playbackId }),
   });
   const data = await response.json().catch(() => ({} as any));
   if (!response.ok) {

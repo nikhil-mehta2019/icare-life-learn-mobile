@@ -170,13 +170,26 @@ function SectionHeader({ title, count }: { title: string; count: number }) {
   );
 }
 
-function ModuleHeader({ title, count }: { title: string; count: number }) {
+function CourseHeader({ title, count, expanded, onToggle }: { title: string; count: number; expanded: boolean; onToggle: () => void }) {
   return (
-    <View style={styles.moduleHeader}>
+    <Pressable style={styles.sectionHeader} onPress={onToggle}>
+      <Text style={styles.sectionTitle}>{title}</Text>
+      <View style={styles.headerRight}>
+        <Text style={styles.sectionCount}>{count} {count === 1 ? 'video' : 'videos'}</Text>
+        <Text style={styles.chevron}>{expanded ? '⌃' : '⌄'}</Text>
+      </View>
+    </Pressable>
+  );
+}
+
+function ModuleHeader({ title, count, expanded, onToggle }: { title: string; count: number; expanded: boolean; onToggle: () => void }) {
+  return (
+    <Pressable style={styles.moduleHeader} onPress={onToggle}>
       <View style={styles.moduleAccent} />
       <Text style={styles.moduleTitle} numberOfLines={1}>{title}</Text>
       <Text style={styles.sectionCount}>{count}</Text>
-    </View>
+      <Text style={styles.chevron}>{expanded ? '⌃' : '⌄'}</Text>
+    </Pressable>
   );
 }
 
@@ -293,6 +306,50 @@ function ContentCard({ item, onPress, onMorePress }: {
   );
 }
 
+function ContentRow({ item, onPress, onMorePress }: {
+  item: EnrichedDownload;
+  onPress: () => void;
+  onMorePress: () => void;
+}) {
+  const watched = Math.min(100, item.progress?.percentWatched ?? 0);
+  return (
+    <Pressable style={styles.contentRow} onPress={onPress}>
+      <View style={{ position: 'relative' }}>
+        <Thumbnail size={96} url={item.thumbnailUrl} />
+        {watched > 1 ? (
+          <View style={styles.watchTrack}>
+            <View style={[styles.watchFill, { width: `${watched}%` as any }]} />
+          </View>
+        ) : null}
+        {item.accessStatus !== 'active' ? (
+          <View style={[
+            styles.accessBadge,
+            { backgroundColor: item.accessStatus === 'expired' ? DANGER : WARN },
+          ]}>
+            <Text style={styles.accessBadgeText}>
+              {item.accessStatus === 'expired' ? 'Access expired' : 'Expires soon'}
+            </Text>
+          </View>
+        ) : null}
+      </View>
+      <View style={styles.contentRowBody}>
+        <Text style={[styles.compactTitle, { marginTop: 0 }]} numberOfLines={2}>{item.title ?? item.id}</Text>
+        <View style={styles.metaWrap}>
+          {item.durationSeconds ? <Text style={styles.smallMeta}>{fmtDuration(item.durationSeconds)}</Text> : null}
+          {item.entitlement?.accessExpiresAt ? (
+            <Text style={styles.smallMeta}>Access until {fmtDate(item.entitlement.accessExpiresAt)}</Text>
+          ) : item.downloadedAt ? (
+            <Text style={styles.smallMeta}>Downloaded {fmtDate(item.downloadedAt)}</Text>
+          ) : null}
+        </View>
+      </View>
+      <Pressable style={styles.moreButton} onPress={onMorePress} hitSlop={8}>
+        <Text style={styles.moreText}>•••</Text>
+      </Pressable>
+    </Pressable>
+  );
+}
+
 function EmptyState() {
   return (
     <View style={styles.empty}>
@@ -379,6 +436,9 @@ export default function DownloadsScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [modalItem, setModalItem] = useState<EnrichedDownload | null>(null);
+  const [expandedCourses, setExpandedCourses] = useState<Set<string>>(new Set());
+  const [expandedModules, setExpandedModules] = useState<Set<string>>(new Set());
+  const [collapsedInitialized, setCollapsedInitialized] = useState(false);
   const [resolvedTitles, setResolvedTitles] = useState<Record<string, string>>({});
   const resolvedTitlesRef = useRef<Record<string, string>>({});
   const [resolvedHierarchy, setResolvedHierarchy] = useState<Record<string, { courseName: string; moduleName: string }>>({});
@@ -634,6 +694,33 @@ export default function DownloadsScreen() {
     return result;
   }, [enriched]);
 
+  useEffect(() => {
+    if (collapsedInitialized) return;
+    const courseSections = sections.filter((s): s is Extract<Section, { type: 'course' }> => s.type === 'course');
+    if (!courseSections.length) return;
+    setExpandedCourses(new Set(courseSections.map((s) => s.courseName)));
+    setExpandedModules(new Set(
+      courseSections.flatMap((s) => s.modules.map((m) => `${s.courseName}::${m.moduleName}`)),
+    ));
+    setCollapsedInitialized(true);
+  }, [sections, collapsedInitialized]);
+
+  const toggleCourse = useCallback((courseName: string) => {
+    setExpandedCourses((current) => {
+      const next = new Set(current);
+      if (next.has(courseName)) next.delete(courseName); else next.add(courseName);
+      return next;
+    });
+  }, []);
+
+  const toggleModule = useCallback((key: string) => {
+    setExpandedModules((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }, []);
+
   const renderSection = useCallback((section: Section) => {
     switch (section.type) {
       case 'storage':
@@ -674,24 +761,33 @@ export default function DownloadsScreen() {
       case 'course': {
         const title = section.courseName === '__ungrouped__' ? 'Downloaded Videos' : section.courseName;
         const count = section.modules.reduce((sum, module) => sum + module.items.length, 0);
+        const courseOpen = expandedCourses.has(section.courseName);
         return (
           <View key={`course-${section.courseName}`}>
-            <SectionHeader title={title} count={count} />
-            {section.modules.map((module) => (
-              <View key={`${section.courseName}-${module.moduleName || '_default'}`}>
-                {module.moduleName ? <ModuleHeader title={module.moduleName} count={module.items.length} /> : null}
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.horizontalContent}>
-                  {module.items.map((item) => (
-                    <ContentCard
-                      key={item.id}
-                      item={item}
-                      onPress={() => item.accessStatus === 'expired' ? setModalItem(item) : navigateToPlayer(item.id)}
-                      onMorePress={() => setModalItem(item)}
-                    />
-                  ))}
-                </ScrollView>
-              </View>
-            ))}
+            <CourseHeader title={title} count={count} expanded={courseOpen} onToggle={() => toggleCourse(section.courseName)} />
+            {courseOpen && section.modules.map((module) => {
+              const moduleKey = `${section.courseName}::${module.moduleName}`;
+              const moduleOpen = expandedModules.has(moduleKey);
+              return (
+                <View key={`${section.courseName}-${module.moduleName || '_default'}`}>
+                  {module.moduleName ? (
+                    <ModuleHeader title={module.moduleName} count={module.items.length} expanded={moduleOpen} onToggle={() => toggleModule(moduleKey)} />
+                  ) : null}
+                  {(!module.moduleName || moduleOpen) && (
+                    <View style={styles.verticalContent}>
+                      {module.items.map((item) => (
+                        <ContentRow
+                          key={item.id}
+                          item={item}
+                          onPress={() => item.accessStatus === 'expired' ? setModalItem(item) : navigateToPlayer(item.id)}
+                          onMorePress={() => setModalItem(item)}
+                        />
+                      ))}
+                    </View>
+                  )}
+                </View>
+              );
+            })}
           </View>
         );
       }
@@ -700,7 +796,7 @@ export default function DownloadsScreen() {
       default:
         return null;
     }
-  }, [deviceStorage, enriched, handleDelete, navigateToPlayer, offlineBytes]);
+  }, [deviceStorage, enriched, handleDelete, navigateToPlayer, offlineBytes, expandedCourses, expandedModules, toggleCourse, toggleModule]);
 
   if (loading) {
     return (
@@ -805,10 +901,13 @@ const styles = StyleSheet.create({
   sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingTop: 20, paddingBottom: 8 },
   sectionTitle: { color: TEXT, fontSize: 15, fontWeight: '700', flex: 1 },
   sectionCount: { color: TEXT_MUTED, fontSize: 11 },
+  headerRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  chevron: { color: TEXT_MUTED, fontSize: 18, paddingHorizontal: 2 },
   moduleHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 20, paddingTop: 8, paddingBottom: 4 },
   moduleAccent: { width: 3, height: 14, borderRadius: 2, backgroundColor: ACCENT },
   moduleTitle: { color: TEXT_MUTED, fontSize: 12, fontWeight: '600', flex: 1 },
   horizontalContent: { paddingHorizontal: 16, paddingBottom: 12 },
+  verticalContent: { paddingHorizontal: 16, paddingBottom: 12, gap: 10 },
 
   thumb: { backgroundColor: SURFACE, borderRadius: 8, overflow: 'hidden', alignItems: 'center', justifyContent: 'center' },
   thumbIcon: { fontSize: 28 },
@@ -816,6 +915,8 @@ const styles = StyleSheet.create({
   playBadgeText: { color: '#000', fontSize: 10, fontWeight: '900' },
   continueCard: { width: 160, marginRight: 12 },
   contentCard: { width: 150, marginRight: 12 },
+  contentRow: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: CARD_BG, borderRadius: 12, padding: 10, borderWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(255,255,255,0.08)' },
+  contentRowBody: { flex: 1, gap: 2 },
   compactTitle: { color: TEXT, fontSize: 12, fontWeight: '600', lineHeight: 16, marginTop: 6 },
   smallMeta: { color: TEXT_MUTED, fontSize: 10, marginTop: 3 },
   metaWrap: { gap: 1 },
