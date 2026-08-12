@@ -1,6 +1,7 @@
 package expo.modules.icareofflinedrm
 
 import android.net.Uri
+import android.util.Log
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
@@ -131,6 +132,7 @@ class IcareOfflineDrmModule : Module() {
             helperRef.set(helper)
             helper.prepare(object : androidx.media3.exoplayer.offline.DownloadHelper.Callback {
               override fun onPrepared(h: androidx.media3.exoplayer.offline.DownloadHelper, isEmpty: Boolean) {
+                val TAG = "IcareOfflineDrm"
                 try {
                   val defaultParams = androidx.media3.exoplayer.offline.DownloadHelper
                     .getDefaultTrackSelectorParameters(ctx)
@@ -138,39 +140,96 @@ class IcareOfflineDrmModule : Module() {
                   // Empty/null set = no filtering (download all languages).
                   val audioLangFilter = params.audioLanguages?.filter { it.isNotBlank() }?.toSet() ?: emptySet()
                   val captionLangFilter = params.captionLanguages?.filter { it.isNotBlank() }?.toSet() ?: emptySet()
-                  android.util.Log.d("IcareOfflineDrm",
-                    "onPrepared: audioLangFilter=$audioLangFilter captionLangFilter=$captionLangFilter " +
-                    "(raw params.audioLanguages=${params.audioLanguages} params.captionLanguages=${params.captionLanguages})")
+                  Log.d(TAG,
+                    "=== onPrepared START === periodCount=${h.periodCount} " +
+                    "audioLangFilter=$audioLangFilter captionLangFilter=$captionLangFilter")
+
+                  // Global counters across all periods/renderers — the required
+                  // "Total audio groups discovered / selected" summary.
+                  var totalAudioGroupsDiscovered = 0
+                  var totalAudioGroupsSelected = 0
+                  val allSelectedAudioLangs = mutableListOf<String>()
+                  // Track every (lang) we've already selected ACROSS periods+renderers,
+                  // so if the same logical rendition is exposed more than once — whether
+                  // via multiple periods, multiple renderers, or multiple TrackGroups in
+                  // the same period — we only ever addTrackSelection() for it once.
+                  val globallySelectedAudioLangs = mutableSetOf<String>()
 
                   for (periodIndex in 0 until h.periodCount) {
                     h.clearTrackSelections(periodIndex)
-                    val tga = h.getTrackGroups(periodIndex) // returns TrackGroupArray in Media3 1.8.0
 
-                    // ── Identify best audio group per language ───────────────────
-                    // When an HLS manifest declares multiple audio groups with the
-                    // same language/name (e.g. "Default" × 3 at different bitrates),
-                    // we want to download only ONE per language to avoid duplicate
-                    // tracks in the offline player UI.
-                    // Highest bitrate wins; undeclared bitrate → Int.MAX_VALUE so
-                    // the last-seen entry prevails (typical for HLS group ordering).
-                    val bestAudioPerLang = mutableMapOf<String, Pair<Int, Int>>()
-                    for (i in 0 until tga.length) {
-                      val g   = tga.get(i)
-                      if (g.length == 0) continue
-                      val fmt = g.getFormat(0)
-                      val isAudio = MimeTypes.isAudio(fmt.sampleMimeType ?: "")
-                      android.util.Log.d("IcareOfflineDrm",
-                        "onPrepared: period=$periodIndex group[$i] mime=${fmt.sampleMimeType} isAudio=$isAudio " +
-                        "lang=${fmt.language} bitrate=${fmt.bitrate} id=${fmt.id}")
-                      if (!isAudio) continue
-                      val lang = fmt.language ?: "und"
-                      if (audioLangFilter.isNotEmpty() && lang !in audioLangFilter) continue
-                      val bits = if (fmt.bitrate > 0) fmt.bitrate else Int.MAX_VALUE
-                      val cur  = bestAudioPerLang[lang]
-                      if (cur == null || bits >= cur.second) bestAudioPerLang[lang] = Pair(i, bits)
+                    val mappedTrackInfo = h.getMappedTrackInfo(periodIndex)
+                    val rendererCount = mappedTrackInfo.rendererCount
+                    Log.d(TAG, "--- period=$periodIndex rendererCount=$rendererCount ---")
+
+                    // ── Discover every audio TrackGroup across every renderer in this
+                    // period. Media3's DownloadHelper can map audio to more than one
+                    // renderer index (e.g. if the manifest declares groups that get
+                    // assigned to distinct renderers), so iterating h.getTrackGroups()
+                    // (a flattened, period-level view) alone can miss the renderer
+                    // dimension. We log both to prove/disprove exactly where
+                    // duplication is introduced.
+                    data class AudioGroupInfo(
+                      val rendererIndex: Int,
+                      val groupIndexInRenderer: Int,
+                      val group: androidx.media3.common.TrackGroup,
+                      val format: androidx.media3.common.Format,
+                    )
+                    val discovered = mutableListOf<AudioGroupInfo>()
+
+                    for (rendererIndex in 0 until rendererCount) {
+                      if (mappedTrackInfo.getRendererType(rendererIndex) != C.TRACK_TYPE_AUDIO) continue
+                      val groups = mappedTrackInfo.getTrackGroups(rendererIndex)
+                      for (gi in 0 until groups.length) {
+                        val g = groups.get(gi)
+                        if (g.length == 0) continue
+                        val fmt = g.getFormat(0)
+                        val groupHash = System.identityHashCode(g)
+                        Log.d(TAG,
+                          "AUDIO_GROUP_DISCOVERED renderer=$rendererIndex period=$periodIndex " +
+                          "groupIndex=$gi groupHash=$groupHash lang=${fmt.language} label=${fmt.label} " +
+                          "roleFlags=${fmt.roleFlags} mime=${fmt.sampleMimeType} codecs=${fmt.codecs} " +
+                          "channelCount=${fmt.channelCount} bitrate=${fmt.bitrate} trackCount=${g.length} " +
+                          "formatId=${fmt.id}")
+                        discovered.add(AudioGroupInfo(rendererIndex, gi, g, fmt))
+                      }
                     }
-                    android.util.Log.d("IcareOfflineDrm",
-                      "onPrepared: bestAudioPerLang=$bestAudioPerLang (selecting ${bestAudioPerLang.size} audio group(s) for download)")
+                    totalAudioGroupsDiscovered += discovered.size
+
+                    // Detect whether "duplicates" are truly distinct TrackGroup
+                    // objects (different identity hash) or the same manifest data
+                    // being iterated more than once.
+                    val byLang = discovered.groupBy { it.format.language ?: "und" }
+                    for ((lang, groupsForLang) in byLang) {
+                      if (groupsForLang.size <= 1) continue
+                      val hashes = groupsForLang.map { System.identityHashCode(it.group) }
+                      val renderers = groupsForLang.map { it.rendererIndex }.distinct()
+                      val bitrates = groupsForLang.map { it.format.bitrate }
+                      val formatIds = groupsForLang.map { it.format.id }
+                      Log.w(TAG,
+                        "DUPLICATE_LANG_DETECTED lang=$lang count=${groupsForLang.size} " +
+                        "distinctRenderers=$renderers distinctGroupHashes=${hashes.distinct()} " +
+                        "bitrates=$bitrates formatIds=$formatIds " +
+                        "sameGroupObject=${hashes.distinct().size == 1} " +
+                        "sameRenderer=${renderers.size == 1}")
+                    }
+
+                    // ── Select ONE group per language — highest bitrate wins.
+                    // Dedup key is language only (matches product requirement: one
+                    // menu entry per language), and — critically — the "already
+                    // selected" check is GLOBAL (globallySelectedAudioLangs), not
+                    // scoped to this renderer or this period, so no downstream loop
+                    // can re-select a language we already picked.
+                    val bestPerLang = mutableMapOf<String, AudioGroupInfo>()
+                    for (info in discovered) {
+                      val lang = info.format.language ?: "und"
+                      if (audioLangFilter.isNotEmpty() && lang !in audioLangFilter) continue
+                      val bits = if (info.format.bitrate > 0) info.format.bitrate else Int.MAX_VALUE
+                      val cur = bestPerLang[lang]
+                      if (cur == null || bits >= (if (cur.format.bitrate > 0) cur.format.bitrate else Int.MAX_VALUE)) {
+                        bestPerLang[lang] = info
+                      }
+                    }
 
                     // 1. Video — let defaultParams pick the adaptive quality set
                     h.addTrackSelection(
@@ -181,21 +240,38 @@ class IcareOfflineDrmModule : Module() {
                         .build()
                     )
 
-                    // 2. Audio — ONE group per language only
-                    for ((_, pair) in bestAudioPerLang) {
-                      val g = tga.get(pair.first)
+                    // 2. Audio — ONE group per language, globally deduped.
+                    for ((lang, info) in bestPerLang) {
+                      if (lang in globallySelectedAudioLangs) {
+                        Log.w(TAG,
+                          "AUDIO_GROUP_SKIPPED_ALREADY_SELECTED renderer=${info.rendererIndex} " +
+                          "period=$periodIndex groupIndex=${info.groupIndexInRenderer} lang=$lang " +
+                          "reason='language already selected in a prior period/renderer'")
+                        continue
+                      }
+                      Log.d(TAG,
+                        "AUDIO_GROUP_SELECTED renderer=${info.rendererIndex} period=$periodIndex " +
+                        "groupIndex=${info.groupIndexInRenderer} lang=$lang bitrate=${info.format.bitrate} " +
+                        "formatId=${info.format.id} reason='highest bitrate for this language, not yet downloaded'")
                       h.addTrackSelection(
                         periodIndex,
                         defaultParams.buildUpon()
                           .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, true)
                           .setTrackTypeDisabled(C.TRACK_TYPE_TEXT,  true)
-                          .addOverride(TrackSelectionOverride(g, (0 until g.length).toList()))
+                          .addOverride(TrackSelectionOverride(info.group, (0 until info.group.length).toList()))
                           .build()
                       )
+                      globallySelectedAudioLangs.add(lang)
+                      totalAudioGroupsSelected++
+                      allSelectedAudioLangs.add(lang)
                     }
 
                     // 3. Text/subtitle — include declared groups, filtered by captionLangFilter
-                    //    (empty filter = all languages, preserving prior behavior)
+                    //    (empty filter = all languages, preserving prior behavior).
+                    //    Use the period-level flattened view here since captions were
+                    //    never the source of the audio-duplication bug and this keeps
+                    //    the fix minimal/scoped.
+                    val tga = h.getTrackGroups(periodIndex)
                     for (i in 0 until tga.length) {
                       val g = tga.get(i)
                       if (g.length == 0) continue
@@ -213,10 +289,14 @@ class IcareOfflineDrmModule : Module() {
                     }
                   }
 
+                  Log.d(TAG,
+                    "=== onPrepared SUMMARY === totalAudioGroupsDiscovered=$totalAudioGroupsDiscovered " +
+                    "totalAudioGroupsSelected=$totalAudioGroupsSelected languagesSelected=$allSelectedAudioLangs")
+
                   downloadRequestRef.set(h.getDownloadRequest(params.id, null))
                 }
                 catch (e: Throwable) {
-                  android.util.Log.e("IcareOfflineDrm", "onPrepared track-selection failed", e)
+                  Log.e(TAG, "onPrepared track-selection failed", e)
                   prepErr.set(e)
                 }
                 latch.countDown()
@@ -421,12 +501,18 @@ class IcareOfflineDrmModule : Module() {
           throw CodedException("ENO_DOWNLOAD", "No completed download for id=$id", null)
         }
         val title = DownloadMetadata.getTitle(ctx, id) ?: id
-        val intent = android.content.Intent(ctx, OfflinePlayerActivity::class.java).apply {
-          addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+        // Launch from the current Activity (not FLAG_ACTIVITY_NEW_TASK) so
+        // OfflinePlayerActivity joins the app's existing task/back-stack.
+        // A separate task previously let the player keep playing in the
+        // background after in-app navigation, since it never received a
+        // reliable onStop() as part of the RN app's own navigation.
+        val activityCtx = appContext.currentActivity
+          ?: throw CodedException("ENO_ACTIVITY", "No current Activity to launch from", null)
+        val intent = android.content.Intent(activityCtx, OfflinePlayerActivity::class.java).apply {
           putExtra(OfflinePlayerActivity.EXTRA_DOWNLOAD_ID, id)
           putExtra(OfflinePlayerActivity.EXTRA_TITLE, title)
         }
-        ctx.startActivity(intent)
+        activityCtx.startActivity(intent)
         promise.resolve(null)
       } catch (e: CodedException) {
         promise.reject(e)

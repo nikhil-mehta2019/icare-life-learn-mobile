@@ -10,6 +10,7 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.ImageButton
+import android.widget.PopupMenu
 import android.widget.TextView
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -20,6 +21,7 @@ import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.cache.CacheDataSource
+import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.drm.DefaultDrmSessionManager
 import androidx.media3.exoplayer.drm.DrmSessionManagerProvider
@@ -48,8 +50,7 @@ class OfflinePlayerActivity : Activity() {
 
     private var player: ExoPlayer? = null
     private var playerView: PlayerView? = null
-    private var audioButton: TextView? = null
-    private var captionButton: TextView? = null
+    private var settingsButton: ImageButton? = null
     private var audioChoices: List<TrackChoice> = emptyList()
     private var captionChoices: List<TrackChoice> = emptyList()
     private var preferredCodes: List<String> = emptyList()
@@ -119,17 +120,23 @@ class OfflinePlayerActivity : Activity() {
         closeBtn.setOnClickListener { finish() }
         root.addView(closeBtn)
 
-        // Single-line landscape chips avoid the clipped two-line treatment while
-        // keeping control identity and active language visible at all times.
-        val audioBtn = makeTopControl("AUDIO", "Audio", 136, 250)
-        audioBtn.setOnClickListener { showAudioChooser() }
-        audioButton = audioBtn
-        root.addView(audioBtn)
-
-        val captionsBtn = makeTopControl("CC", "CC", 402, 250)
-        captionsBtn.setOnClickListener { showCaptionChooser() }
-        captionButton = captionsBtn
-        root.addView(captionsBtn)
+        // Single settings (gear) entry point, bottom-right — matches the web
+        // player's Playback/Audio/Subtitles menu instead of two always-visible
+        // floating chips.
+        val settingsBtn = ImageButton(this)
+        settingsBtn.setImageResource(android.R.drawable.ic_menu_manage)
+        settingsBtn.setBackgroundColor(0x66000000.toInt())
+        settingsBtn.contentDescription = "Playback settings"
+        settingsBtn.visibility = View.GONE
+        val settingsLp = FrameLayout.LayoutParams(96, 96)
+        settingsLp.gravity = Gravity.BOTTOM or Gravity.END
+        // Sits just above PlayerView's built-in transport control bar.
+        settingsLp.bottomMargin = 96
+        settingsLp.rightMargin = 16
+        settingsBtn.layoutParams = settingsLp
+        settingsBtn.setOnClickListener { showSettingsMenu(it) }
+        settingsButton = settingsBtn
+        root.addView(settingsBtn)
 
         setContentView(root)
 
@@ -171,8 +178,15 @@ class OfflinePlayerActivity : Activity() {
             null
         }
 
+        // An upstream factory is required even for cache-only playback: without one,
+        // CacheDataSource can fail resolving reads instead of serving purely from the
+        // local cache. FLAG_BLOCK_ON_CACHE still prevents this upstream from ever being
+        // hit for content that's actually cached, so offline playback stays cache-only.
+        val upstreamDataSourceFactory = OkHttpDataSource.Factory(okhttp3.OkHttpClient.Builder().build())
+            .setUserAgent("IcareLifeLearn-Android-Offline/1.0")
         val cacheDataSourceFactory = CacheDataSource.Factory()
             .setCache(DownloadUtil.getDownloadCache(applicationContext))
+            .setUpstreamDataSourceFactory(upstreamDataSourceFactory)
             .setFlags(CacheDataSource.FLAG_BLOCK_ON_CACHE)
 
         val drmManagerProvider: DrmSessionManagerProvider? =
@@ -228,35 +242,6 @@ class OfflinePlayerActivity : Activity() {
         exo.playWhenReady = true
     }
 
-    private fun makeTopControl(
-        label: String,
-        value: String,
-        rightMargin: Int,
-        width: Int,
-    ): TextView {
-        return TextView(this).apply {
-            setTextColor(0xFFFFFFFF.toInt())
-            textSize = 13f
-            gravity = Gravity.CENTER
-            maxLines = 1
-            setPadding(18, 0, 18, 0)
-            setBackgroundColor(0xB3000000.toInt())
-            visibility = View.GONE
-            setControlText(this, label, value)
-            layoutParams = FrameLayout.LayoutParams(width, 64).also {
-                it.gravity = Gravity.TOP or Gravity.END
-                it.topMargin = 30
-                it.rightMargin = rightMargin
-            }
-        }
-    }
-
-    private fun setControlText(button: TextView, label: String, value: String) {
-        val visibleValue = shortLabel(value)
-        button.text = "$label · $visibleValue  ▾"
-        button.contentDescription = "$label, $value. Double tap to change."
-    }
-
     private fun rebuildChoices(tracks: Tracks) {
         val audioByLanguage = linkedMapOf<String, TrackChoice>()
         val captionsByLanguage = linkedMapOf<String, TrackChoice>()
@@ -288,8 +273,8 @@ class OfflinePlayerActivity : Activity() {
 
         audioChoices = orderAndFilter(audioByLanguage)
         captionChoices = orderAndFilter(captionsByLanguage)
-        audioButton?.visibility = if (audioChoices.isNotEmpty()) View.VISIBLE else View.GONE
-        captionButton?.visibility = if (captionChoices.isNotEmpty()) View.VISIBLE else View.GONE
+        settingsButton?.visibility =
+            if (audioChoices.isNotEmpty() || captionChoices.isNotEmpty()) View.VISIBLE else View.GONE
 
         Log.d(TAG, "allowed audio choices=${audioChoices.joinToString { "${it.label}[${it.key}]" }}")
         Log.d(TAG, "allowed caption choices=${captionChoices.joinToString { "${it.label}[${it.key}]" }}")
@@ -312,7 +297,6 @@ class OfflinePlayerActivity : Activity() {
         audioChoices.firstOrNull()?.let { choice ->
             builder.addOverride(TrackSelectionOverride(choice.group, listOf(choice.trackIndex)))
             selectedAudioKey = choice.key
-            audioButton?.let { setControlText(it, "AUDIO", choice.label) }
             Log.d(TAG, "initial audio=${choice.label} key=${choice.key}")
         }
 
@@ -322,12 +306,10 @@ class OfflinePlayerActivity : Activity() {
                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
                 .addOverride(TrackSelectionOverride(initialCaption.group, listOf(initialCaption.trackIndex)))
             selectedCaptionKey = initialCaption.key
-            captionButton?.let { setControlText(it, "CC", initialCaption.label) }
             Log.d(TAG, "initial captions=${initialCaption.label} key=${initialCaption.key}")
         } else {
             builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
             selectedCaptionKey = null
-            captionButton?.let { setControlText(it, "CC", "Off") }
             Log.d(TAG, "initial captions=OFF — no preferred caption available")
         }
 
@@ -343,7 +325,27 @@ class OfflinePlayerActivity : Activity() {
         return display ?: label?.trim().takeUnless { it.isNullOrBlank() } ?: code.uppercase(Locale.ROOT)
     }
 
-    private fun shortLabel(label: String): String = label.take(16)
+    /** Web-matching entry point: gear icon → popup with current Audio/Subtitles selections. */
+    private fun showSettingsMenu(anchor: View) {
+        val currentAudioLabel = audioChoices.firstOrNull { it.key == selectedAudioKey }?.label
+        val currentCaptionLabel = captionChoices.firstOrNull { it.key == selectedCaptionKey }?.label ?: "Off"
+
+        val popup = PopupMenu(this, anchor)
+        if (audioChoices.isNotEmpty()) {
+            popup.menu.add(0, 0, 0, "Audio / $currentAudioLabel")
+        }
+        if (captionChoices.isNotEmpty()) {
+            popup.menu.add(0, 1, 1, "Subtitles / $currentCaptionLabel")
+        }
+        popup.setOnMenuItemClickListener { item ->
+            when (item.itemId) {
+                0 -> showAudioChooser()
+                1 -> showCaptionChooser()
+            }
+            true
+        }
+        popup.show()
+    }
 
     private fun showAudioChooser() {
         val choices = audioChoices
@@ -360,7 +362,6 @@ class OfflinePlayerActivity : Activity() {
                     .addOverride(TrackSelectionOverride(choice.group, listOf(choice.trackIndex)))
                 currentPlayer.trackSelectionParameters = builder.build()
                 selectedAudioKey = choice.key
-                audioButton?.let { setControlText(it, "AUDIO", choice.label) }
                 Log.d(TAG, "audio selected=${choice.label} key=${choice.key} bitrate=${choice.bitrate}")
                 dialog.dismiss()
             }
@@ -382,7 +383,6 @@ class OfflinePlayerActivity : Activity() {
                 if (which == 0) {
                     builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
                     selectedCaptionKey = null
-                    captionButton?.let { setControlText(it, "CC", "Off") }
                     Log.d(TAG, "captions selected=OFF")
                 } else {
                     val choice = choices[which - 1]
@@ -390,7 +390,6 @@ class OfflinePlayerActivity : Activity() {
                         .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
                         .addOverride(TrackSelectionOverride(choice.group, listOf(choice.trackIndex)))
                     selectedCaptionKey = choice.key
-                    captionButton?.let { setControlText(it, "CC", choice.label) }
                     Log.d(TAG, "captions selected=${choice.label} key=${choice.key}")
                 }
                 currentPlayer.trackSelectionParameters = builder.build()
@@ -412,7 +411,6 @@ class OfflinePlayerActivity : Activity() {
         captionChoices = emptyList()
         selectedAudioKey = null
         selectedCaptionKey = null
-        audioButton = null
-        captionButton = null
+        settingsButton = null
     }
 }

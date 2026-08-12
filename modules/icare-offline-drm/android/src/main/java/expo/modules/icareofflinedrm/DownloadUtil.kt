@@ -4,12 +4,12 @@ import android.content.Context
 import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.StandaloneDatabaseProvider
+import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.NoOpCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.datasource.okhttp.OkHttpDataSource
-import androidx.media3.exoplayer.RendererCapabilities
-import androidx.media3.exoplayer.RendererCapabilitiesList
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.offline.DefaultDownloadIndex
 import androidx.media3.exoplayer.offline.DefaultDownloaderFactory
 import androidx.media3.exoplayer.offline.DownloadHelper
@@ -87,16 +87,33 @@ object DownloadUtil {
   }
 
   fun getDownloadHelperForMediaItem(ctx: Context, mediaItem: MediaItem): DownloadHelper {
-    return DownloadHelper(
+    // IMPORTANT: must pass a real RenderersFactory here (not a stub/empty
+    // RendererCapabilitiesList). DownloadHelper's internal `mode` is derived
+    // from whether a non-null MediaSource gets built — an empty renderer
+    // list previously caused DownloadHelper to skip HLS manifest preparation
+    // entirely (mode = MODE_NOT_PREPARE), making periodCount always 0 and
+    // silently skipping ALL track-selection logic in onPrepared(). With no
+    // selection applied, Media3 fell back to downloading every track group
+    // declared in the manifest — including Mux's duplicate per-language
+    // audio groups — which is what produced tripled "English / Swahili"
+    // entries in the offline track-selection menu.
+    //
+    // DefaultRenderersFactory here is only used for track/format capability
+    // resolution during download preparation — it does not touch playback
+    // or introduce the earlier DRM-HAL-probe hang that motivated shortening
+    // the prepare() timeout (that was a separate Widevine openSession()
+    // issue, unrelated to renderer construction).
+    val renderersFactory = DefaultRenderersFactory(ctx)
+    val dataSourceFactory: DataSource.Factory = getDownloadCache(ctx).let {
+      CacheDataSource.Factory()
+        .setCache(it)
+        .setUpstreamDataSourceFactory(OkHttpDataSource.Factory(OkHttpClient.Builder().build()).setUserAgent(USER_AGENT))
+    }
+    return DownloadHelper.forMediaItem(
       mediaItem,
-      null,
       DownloadHelper.DEFAULT_TRACK_SELECTOR_PARAMETERS_WITHOUT_CONTEXT,
-      object : RendererCapabilitiesList {
-        private val empty = emptyArray<RendererCapabilities>()
-        override fun getRendererCapabilities(): Array<RendererCapabilities> = empty
-        override fun size(): Int = 0
-        override fun release() {}
-      }
+      renderersFactory,
+      dataSourceFactory,
     )
   }
 }

@@ -151,6 +151,7 @@ interface VideoPlayerProps {
   chapterId: string;
   initialPositionSeconds: number;
   isDownloadPending: boolean;
+  isFocused: boolean;
   onDelete: () => void;
   onGoToDownloads: () => void;
   onRenewLicense: () => void;
@@ -166,6 +167,7 @@ function VideoPlayer({
   chapterId,
   initialPositionSeconds,
   isDownloadPending,
+  isFocused,
   onDelete,
   onGoToDownloads,
   onRenewLicense,
@@ -267,6 +269,7 @@ function VideoPlayer({
           ref={videoRef}
           source={source}
           drm={drm as any}
+          paused={!isFocused}
           controls
           resizeMode="contain"
           progressUpdateInterval={1000}
@@ -698,6 +701,7 @@ export default function ChapterPlayerScreen() {
       chapterId={chapterId ?? ''}
       initialPositionSeconds={initialPositionSeconds}
       isDownloadPending={isDownloadPending}
+      isFocused={isFocused}
       onDelete={handleDeleteDownload}
       onGoToDownloads={handleGoToDownloads}
       onRenewLicense={handleRenewLicense}

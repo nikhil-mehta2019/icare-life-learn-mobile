@@ -365,6 +365,22 @@ export async function resolveStudentAccess(
   return { status: response.status, data };
 }
 
+export async function resolveStudentAccessWithJwt(
+  courseId: string,
+  jwt: string
+): Promise<{ status: number; data: StudentAccessResponse }> {
+  const response = await fetch(`${BASE_URL}/functions/resolveStudentAccess`, {
+    method: 'POST',
+    headers: {
+      ...defaultHeaders,
+      Authorization: `Bearer ${jwt}`,
+    },
+    body: JSON.stringify({ courseId }),
+  });
+  const data = await response.json();
+  return { status: response.status, data };
+}
+
 export async function testConnection(): Promise<{ status: number; data: unknown }> {
   return apiGet('/entities/Course?limit=1');
 }

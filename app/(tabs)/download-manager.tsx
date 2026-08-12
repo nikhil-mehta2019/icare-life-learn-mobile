@@ -14,6 +14,7 @@ import {
   fetchChapters,
   fetchCourses,
   fetchModules,
+  resolveStudentAccessWithJwt,
   type Chapter,
   type Course,
   type Module,
@@ -83,9 +84,14 @@ export default function DownloadManagerScreen() {
       setDownloads(byId);
       setStorage(device);
 
+      const jwt = getAuthJwt();
       const courseBundles: CourseBundle[] = [];
       for (const course of courses.filter((item) => item.status !== 'archived')) {
         try {
+          if (jwt) {
+            const access = await resolveStudentAccessWithJwt(course.id, jwt);
+            if (!access.data?.hasCourseAccess) continue;
+          }
           const modules = await fetchModules(course.id);
           const moduleBundles: ModuleBundle[] = [];
           for (const module of modules) {
