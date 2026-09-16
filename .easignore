@@ -1,0 +1,17 @@
+# Local build outputs with machine-specific absolute paths baked in —
+# must be excluded so EAS regenerates them fresh on its own build machine.
+android/build/
+android/app/build/
+android/app/.cxx/
+android/.gradle/
+modules/icare-offline-drm/android/build/
+modules/icare-offline-drm/android/.gradle/
+
+# Local IDE / tooling state
+.idea/
+.claude/
+*.log
+
+# Not needed in the build archive
+screenshots/
+docs/
