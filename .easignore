@@ -1,11 +1,14 @@
-# Local build outputs with machine-specific absolute paths baked in —
-# must be excluded so EAS regenerates them fresh on its own build machine.
+# Local build outputs and machine-specific config with absolute paths
+# baked in — must be excluded so EAS regenerates them fresh on its own
+# build machine (SDK/NDK live at different paths there).
 android/build/
 android/app/build/
 android/app/.cxx/
 android/.gradle/
+android/local.properties
 modules/icare-offline-drm/android/build/
 modules/icare-offline-drm/android/.gradle/
+modules/icare-offline-drm/android/local.properties
 
 # Local IDE / tooling state
 .idea/
