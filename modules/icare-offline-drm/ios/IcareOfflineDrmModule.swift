@@ -1,5 +1,7 @@
 import ExpoModulesCore
 import AVFoundation
+import UIKit
+import UserNotifications
 
 // MARK: - JS-facing records (mirror the Android module's records)
 
@@ -133,6 +135,8 @@ final class OfflineDownloadManager: NSObject, AVAssetDownloadDelegate {
       return
     }
     tasks[id]?.cancel()
+
+    requestNotificationPermissionIfNeeded()
 
     let asset = AVURLAsset(url: url)
     let config = AVAssetDownloadConfiguration(asset: asset, title: title ?? "Lesson")
@@ -268,14 +272,40 @@ final class OfflineDownloadManager: NSObject, AVAssetDownloadDelegate {
       }
       record.state = "failed"
       record.failureReason = error.localizedDescription
+      notify(title: "Download failed", body: record.title ?? "Lesson", id: id)
     } else {
       record.state = "completed"
       record.percent = 100
       record.failureReason = nil
+      notify(title: "Download complete", body: record.title ?? "Lesson ready for offline viewing", id: id)
     }
     stored[id] = record
     save()
     emit(record)
+  }
+
+  // MARK: Notifications (iOS counterpart of Android's download notification)
+
+  private func requestNotificationPermissionIfNeeded() {
+    let center = UNUserNotificationCenter.current()
+    center.getNotificationSettings { settings in
+      if settings.authorizationStatus == .notDetermined {
+        center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+      }
+    }
+  }
+
+  /// Only when the app is not in the foreground (the in-app UI already shows progress).
+  private func notify(title: String, body: String, id: String) {
+    guard UIApplication.shared.applicationState != .active else { return }
+    let content = UNMutableNotificationContent()
+    content.title = title
+    content.body = body
+    content.sound = .default
+    let request = UNNotificationRequest(
+      identifier: "life.icare.offline.\(id)", content: content, trigger: nil
+    )
+    UNUserNotificationCenter.current().add(request)
   }
 
   // MARK: Helpers
@@ -302,6 +332,7 @@ final class OfflineDownloadManager: NSObject, AVAssetDownloadDelegate {
       "contentLength": -1,
       "percentDownloaded": record.percent,
       "failureReason": record.failureReason,
+      "title": record.title,
     ]
   }
 
