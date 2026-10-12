@@ -44,11 +44,12 @@
           },
           "ios": {
             "deploymentTarget": "15.1",
-            "newArchEnabled": false
+            "newArchEnabled": true
           }
         }
       ],
-      "./modules/icare-offline-drm/app.plugin.js"
+      "./modules/icare-offline-drm/app.plugin.js",
+      "./plugins/withIosBuildFixes"
     ],
     "android": {
       "adaptiveIcon": {

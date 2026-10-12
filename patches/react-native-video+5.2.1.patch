@@ -1,0 +1,57 @@
+diff --git a/node_modules/react-native-video/Video.js b/node_modules/react-native-video/Video.js
+index a3452ad..168e4ff 100644
+--- a/node_modules/react-native-video/Video.js
++++ b/node_modules/react-native-video/Video.js
+@@ -280,15 +280,25 @@ export default class Video extends Component {
+ 
+     let nativeResizeMode;
+     const RCTVideoInstance = this.getViewManagerConfig('RCTVideo');
++    // iOS under the new architecture exposes no view-manager Constants; use the
++    // AVLayerVideoGravity values RCTVideoManager.m exports instead.
++    const iosConstants = {
++      ScaleNone: 'AVLayerVideoGravityResizeAspect',
++      ScaleToFill: 'AVLayerVideoGravityResize',
++      ScaleAspectFit: 'AVLayerVideoGravityResizeAspect',
++      ScaleAspectFill: 'AVLayerVideoGravityResizeAspectFill',
++    };
++    const resizeConstants =
++      (RCTVideoInstance && RCTVideoInstance.Constants) || iosConstants;
+ 
+     if (resizeMode === VideoResizeMode.stretch) {
+-      nativeResizeMode = RCTVideoInstance.Constants.ScaleToFill;
++      nativeResizeMode = resizeConstants.ScaleToFill;
+     } else if (resizeMode === VideoResizeMode.contain) {
+-      nativeResizeMode = RCTVideoInstance.Constants.ScaleAspectFit;
++      nativeResizeMode = resizeConstants.ScaleAspectFit;
+     } else if (resizeMode === VideoResizeMode.cover) {
+-      nativeResizeMode = RCTVideoInstance.Constants.ScaleAspectFill;
++      nativeResizeMode = resizeConstants.ScaleAspectFill;
+     } else {
+-      nativeResizeMode = RCTVideoInstance.Constants.ScaleNone;
++      nativeResizeMode = resizeConstants.ScaleNone;
+     }
+ 
+     const nativeProps = Object.assign({}, this.props);
+diff --git a/node_modules/react-native-video/ios/Video/RCTVideoManager.m b/node_modules/react-native-video/ios/Video/RCTVideoManager.m
+index 000a9e8..922e21e 100644
+--- a/node_modules/react-native-video/ios/Video/RCTVideoManager.m
++++ b/node_modules/react-native-video/ios/Video/RCTVideoManager.m
+@@ -8,6 +8,9 @@ @implementation RCTVideoManager
+ 
+ RCT_EXPORT_MODULE();
+ 
++// New architecture (bridgeless): the module needs a backing ivar/setter for methodQueue.
++@synthesize methodQueue = _methodQueue;
++
+ - (UIView *)view
+ {
+   return [[RCTVideo alloc] initWithEventDispatcher:self.bridge.eventDispatcher];
+@@ -15,7 +18,7 @@ - (UIView *)view
+ 
+ - (dispatch_queue_t)methodQueue
+ {
+-    return self.bridge.uiManager.methodQueue;
++    return dispatch_get_main_queue();
+ }
+ 
+ RCT_EXPORT_VIEW_PROPERTY(src, NSDictionary);
