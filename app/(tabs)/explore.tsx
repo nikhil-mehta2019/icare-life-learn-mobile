@@ -1,9 +1,12 @@
 import { useRouter, type Href } from 'expo-router';
-import { useCallback, useRef } from 'react';
-import { Platform, StyleSheet } from 'react-native';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView, type WebViewMessageEvent } from 'react-native-webview';
 import type { ShouldStartLoadRequest } from 'react-native-webview/lib/WebViewTypes';
 import { deliverPlayerData } from '../../api/playerCache';
+import IcareOfflineDrm, { onDownloadProgress } from '../../modules/icare-offline-drm';
 
 const BASE44_URL = 'https://icare-life-learn.base44.app';
 
@@ -114,6 +117,49 @@ const INJECTED_JS = [
   '})();',
 ].join('\n');
 
+/**
+ * iOS only: floating entry to the native Downloads list (the web UI has no
+ * Downloads page). Shows a badge with the number of downloads in progress and
+ * stays usable even when the WebView cannot load (offline).
+ */
+function IosDownloadsButton({ onPress }: { onPress: () => void }) {
+  const insets = useSafeAreaInsets();
+  const [active, setActive] = useState(0);
+
+  useEffect(() => {
+    let alive = true;
+    const states = new Map<string, string>();
+    const recount = () => {
+      let n = 0;
+      states.forEach((s) => { if (s === 'queued' || s === 'downloading') n += 1; });
+      if (alive) setActive(n);
+    };
+    IcareOfflineDrm.listDownloads()
+      .then((list) => { list.forEach((d) => states.set(d.id, d.state)); recount(); })
+      .catch(() => {});
+    const sub = onDownloadProgress((e) => {
+      if (e.state === 'removing') states.delete(e.id); else states.set(e.id, e.state);
+      recount();
+    });
+    return () => { alive = false; sub.remove(); };
+  }, []);
+
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel="Downloads"
+      onPress={onPress}
+      style={[styles.fab, { bottom: insets.bottom + 96 }]}>
+      <Ionicons name="download-outline" size={22} color="#fff" />
+      {active > 0 && (
+        <View style={styles.fabBadge}>
+          <Text style={styles.fabBadgeText}>{active}</Text>
+        </View>
+      )}
+    </Pressable>
+  );
+}
+
 export default function ExploreScreen() {
   const router = useRouter();
   const webRef = useRef<WebView>(null);
@@ -158,7 +204,7 @@ export default function ExploreScreen() {
     [router]
   );
 
-  return (
+  const web = (
     <WebView
       ref={webRef}
       source={{ uri: BASE44_URL }}
@@ -176,8 +222,46 @@ export default function ExploreScreen() {
       onMessage={onMessage}
     />
   );
+
+  if (Platform.OS !== 'ios') return web;
+
+  return (
+    <View style={styles.webview}>
+      {web}
+      <IosDownloadsButton
+        onPress={() => router.navigate('/(tabs)/downloads' as unknown as Href)}
+      />
+    </View>
+  );
 }
 
 const styles = StyleSheet.create({
   webview: { flex: 1 },
+  fab: {
+    position: 'absolute',
+    right: 14,
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    backgroundColor: '#7a45a8',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.35,
+    shadowRadius: 4,
+  },
+  fabBadge: {
+    position: 'absolute',
+    top: -4,
+    right: -4,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    paddingHorizontal: 4,
+    backgroundColor: '#e5484d',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  fabBadgeText: { color: '#fff', fontSize: 11, fontWeight: '700' },
 });
