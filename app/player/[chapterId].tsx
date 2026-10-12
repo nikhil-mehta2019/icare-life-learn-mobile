@@ -37,6 +37,15 @@ interface MuxTokenResponse {
   secureStreamUrl: string;
 }
 
+// iOS only: Mux stream URL for chapters whose token response has no secureStreamUrl.
+function iosStreamUrl(ch: Chapter, tk: MuxTokenResponse): string | null {
+  if (tk.secureStreamUrl) return tk.secureStreamUrl;
+  const playbackId = selectMuxPlaybackId(ch);
+  if (!playbackId) return null;
+  const qs = ch.muxSignedPlaybackRequired && tk.token ? `?token=${tk.token}` : '';
+  return `https://stream.mux.com/${playbackId}.m3u8${qs}`;
+}
+
 // iOS only: the getMuxToken function also requires courseId and chapterId.
 function muxIds(ch: Chapter) {
   return Platform.OS === 'ios' ? { courseId: ch.courseId, chapterId: ch.id } : undefined;
@@ -167,6 +176,8 @@ export default function ChapterPlayerScreen() {
   // ----- Build the Video source. -----
   const source: ReactVideoSource | null = useMemo(() => {
     if (mode === 'offline' && offline) {
+      // iOS: local .movpkg downloaded by AVAssetDownloadURLSession.
+      if (Platform.OS === 'ios') return { uri: offline.uri } as ReactVideoSource;
       return {
         uri: offline.uri,
         type: 'm3u8',
@@ -177,12 +188,8 @@ export default function ChapterPlayerScreen() {
       // iOS only: non-DRM chapters return just { token } with no secureStreamUrl,
       // so build the Mux stream URL from the playback ID (signed streams append the token).
       if (Platform.OS === 'ios' && !tokens.secureStreamUrl && chapter) {
-        const playbackId = selectMuxPlaybackId(chapter);
-        if (playbackId) {
-          const qs = chapter.muxSignedPlaybackRequired && tokens.token ? `?token=${tokens.token}` : '';
-          return { uri: `https://stream.mux.com/${playbackId}.m3u8${qs}`, type: 'm3u8' } as ReactVideoSource;
-        }
-        return null;
+        const url = iosStreamUrl(chapter, tokens);
+        return url ? ({ uri: url, type: 'm3u8' } as ReactVideoSource) : null;
       }
       return { uri: tokens.secureStreamUrl, type: 'm3u8' } as ReactVideoSource;
     }
@@ -192,6 +199,7 @@ export default function ChapterPlayerScreen() {
   // ----- DRM block -----
   const drm = useMemo(() => {
     if (mode === 'offline' && offline) {
+      if (Platform.OS === 'ios') return undefined; // non-DRM offline copy
       return {
         type: 'widevine' as DRMType,
         offlineLicense: offline.offlineLicenseKeySetId,
@@ -213,6 +221,21 @@ export default function ChapterPlayerScreen() {
     const playbackId = selectMuxPlaybackId(chapter);
     if (!playbackId) return;
     try {
+      if (Platform.OS === 'ios') {
+        // Reuse the token fetched through the authenticated WebView bridge; a
+        // native fetch has no login and would be rejected as Unauthorized.
+        const tk = tokens ?? (await getMuxToken(playbackId, muxIds(chapter)));
+        const manifestUrl = iosStreamUrl(chapter, tk);
+        if (!manifestUrl) throw new Error('No stream URL available for this lesson');
+        await IcareOfflineDrm.startDownload({
+          id: chapter.id,
+          manifestUrl,
+          drmLicenseUrl: tk.drmLicenseUrl ?? '',
+          drmToken: tk.drmToken ?? '',
+          title: chapter.title,
+        });
+        return;
+      }
       const tk = await getMuxToken(playbackId, muxIds(chapter));
       await IcareOfflineDrm.startDownload({
         id: chapter.id,
@@ -231,11 +254,20 @@ export default function ChapterPlayerScreen() {
     await IcareOfflineDrm.removeDownload(chapterId);
     setDownload(null);
     setOffline(null);
+    // iOS only: opened from the offline copy there is no WebView token, and a native
+    // fetch has no login -> return to the lesson list instead of showing an error.
+    if (Platform.OS === 'ios' && !tokens) {
+      router.back();
+      return;
+    }
     if (chapter) {
       const playbackId = selectMuxPlaybackId(chapter);
       if (playbackId) {
         try {
-          const tk = await getMuxToken(playbackId, muxIds(chapter));
+          const tk =
+            Platform.OS === 'ios' && tokens
+              ? tokens
+              : await getMuxToken(playbackId, muxIds(chapter));
           setTokens(tk);
           setMode('online');
         } catch (err: any) {

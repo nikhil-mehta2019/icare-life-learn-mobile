@@ -1,10 +1,10 @@
 {
   "name": "icare-offline-drm",
   "version": "0.1.0",
-  "description": "ExoPlayer-based offline Widevine DRM downloads for iCare Life Learn",
+  "description": "Offline downloads for iCare Life Learn (ExoPlayer/Widevine on Android, AVAssetDownloadURLSession on iOS)",
   "main": "index.ts",
   "private": true,
   "expo": {
-    "platforms": ["android"]
+    "platforms": ["android", "ios"]
   }
 }

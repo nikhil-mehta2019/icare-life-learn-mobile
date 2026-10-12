@@ -1,6 +1,9 @@
 {
-  "platforms": ["android"],
+  "platforms": ["android", "ios"],
   "android": {
     "modules": ["expo.modules.icareofflinedrm.IcareOfflineDrmModule"]
+  },
+  "ios": {
+    "modules": ["IcareOfflineDrmModule"]
   }
 }

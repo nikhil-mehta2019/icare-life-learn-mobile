@@ -51,14 +51,16 @@ export interface OfflinePlaybackSource {
 
 // ----- Native module wrapper -------------------------------------------
 
-const NativeModule =
-  Platform.OS === 'android' ? requireNativeModule('IcareOfflineDrm') : null;
+// Android: ExoPlayer + Widevine. iOS: AVAssetDownloadURLSession (non-DRM HLS;
+// FairPlay offline is not implemented yet).
+const isSupported = Platform.OS === 'android' || Platform.OS === 'ios';
+
+const NativeModule = isSupported ? requireNativeModule('IcareOfflineDrm') : null;
 
 function ensureAndroid(method: string) {
-  if (Platform.OS !== 'android') {
+  if (!isSupported) {
     throw new Error(
-      `IcareOfflineDrm.${method} is only supported on Android. ` +
-      `iOS uses FairPlay offline via AVAssetDownloadTask — not yet implemented.`
+      `IcareOfflineDrm.${method} is only supported on Android and iOS.`
     );
   }
 }
@@ -90,12 +92,12 @@ export const IcareOfflineDrm = {
 
   /** Returns all known downloads (queued, in-progress, completed). */
   async listDownloads(): Promise<DownloadInfo[]> {
-    if (Platform.OS !== 'android') return [];
+    if (!isSupported) return [];
     return NativeModule.listDownloads();
   },
 
   async getDownload(id: string): Promise<DownloadInfo | null> {
-    if (Platform.OS !== 'android') return null;
+    if (!isSupported) return null;
     return NativeModule.getDownload(id);
   },
 
@@ -104,7 +106,7 @@ export const IcareOfflineDrm = {
   async getOfflineSource(
     params: PlaybackSourceParams
   ): Promise<OfflinePlaybackSource | null> {
-    if (Platform.OS !== 'android') return null;
+    if (!isSupported) return null;
     return NativeModule.getOfflineSource(params);
   },
 
@@ -128,10 +130,9 @@ type IcareDrmEvents = {
   onDownloadProgress: (e: DownloadProgressEvent) => void;
 };
 
-const emitter =
-  Platform.OS === 'android'
-    ? new EventEmitter<IcareDrmEvents>(NativeModule as any)
-    : null;
+const emitter = isSupported
+  ? new EventEmitter<IcareDrmEvents>(NativeModule as any)
+  : null;
 
 export function onDownloadProgress(
   listener: (e: DownloadProgressEvent) => void
