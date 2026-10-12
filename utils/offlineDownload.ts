@@ -1,3 +1,4 @@
+import { Platform } from 'react-native';
 import type { Chapter } from '../api/base44Client';
 import { fetchUserPreferences, getMuxDownloadToken, selectMuxPlaybackId } from '../api/base44Client';
 import IcareOfflineDrm from '../modules/icare-offline-drm';
@@ -56,11 +57,16 @@ export async function queueChapterForOffline(chapter: Chapter, jwt: string): Pro
       ? [preferences.primaryLanguage]
       : [];
 
+  // iOS only: the endpoint returns a Widevine license URL for every lesson of a
+  // DRM-mode course, including lessons that are not DRM-protected. Only pass DRM
+  // fields on iOS when the lesson really is DRM, so plain HLS can be downloaded.
+  const treatAsDrm = Platform.OS !== 'ios' || tokens.drmEnabled;
+
   await IcareOfflineDrm.startDownload({
     id: chapter.id,
     manifestUrl: tokens.manifestUrl,
-    drmLicenseUrl: tokens.widevineLicenseUrl ?? '',
-    drmToken: tokens.drmToken ?? '',
+    drmLicenseUrl: treatAsDrm ? (tokens.widevineLicenseUrl ?? '') : '',
+    drmToken: treatAsDrm ? (tokens.drmToken ?? '') : '',
     title: chapter.title,
     thumbnailUrl: chapter.videoPosterUrl ?? undefined,
     durationSeconds: chapter.estimatedMinutes

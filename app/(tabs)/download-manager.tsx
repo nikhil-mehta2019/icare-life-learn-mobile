@@ -213,6 +213,8 @@ export default function DownloadManagerScreen() {
   return (
     <View style={styles.screen}>
       <ScrollView
+        // iOS only prop: keep the title clear of the notch / status bar.
+        contentInsetAdjustmentBehavior="automatic"
         contentContainerStyle={styles.content}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} tintColor={ACCENT} />}
       >
