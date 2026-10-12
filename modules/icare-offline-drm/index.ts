@@ -63,19 +63,25 @@ export interface DownloadEntitlement {
   validatedAt: string | null;
 }
 
-const NativeModule =
-  Platform.OS === 'android' ? requireNativeModule('IcareOfflineDrm') : null;
-const NativeLanguagePreferences =
-  Platform.OS === 'android' ? requireNativeModule('IcareLanguagePreferences') : null;
-const NativeDownloadManager =
-  Platform.OS === 'android' ? requireNativeModule('IcareDownloadManager') : null;
+// Android: ExoPlayer/Media3 (+ Widevine). iOS: AVAssetDownloadURLSession
+// (non-DRM HLS; FairPlay offline is not implemented yet).
+const isNative = Platform.OS === 'android' || Platform.OS === 'ios';
+
+const NativeModule = isNative ? requireNativeModule('IcareOfflineDrm') : null;
+const NativeLanguagePreferences = isNative ? requireNativeModule('IcareLanguagePreferences') : null;
+const NativeDownloadManager = isNative ? requireNativeModule('IcareDownloadManager') : null;
 
 function ensureAndroid(method: string) {
+  if (!isNative) {
+    throw new Error(`IcareOfflineDrm.${method} is only supported on Android and iOS.`);
+  }
+}
+
+// launchOfflinePlayer opens a native Android Activity; iOS plays offline
+// copies in the React Native player instead.
+function ensureAndroidOnly(method: string) {
   if (Platform.OS !== 'android') {
-    throw new Error(
-      `IcareOfflineDrm.${method} is only supported on Android. ` +
-      `iOS uses FairPlay offline via AVAssetDownloadTask — not yet implemented.`
-    );
+    throw new Error(`IcareOfflineDrm.${method} is only supported on Android.`);
   }
 }
 
@@ -142,21 +148,21 @@ export const IcareOfflineDrm = {
   },
 
   async listDownloads(): Promise<DownloadInfo[]> {
-    if (Platform.OS !== 'android') return [];
+    if (!isNative) return [];
     const list: DownloadInfo[] = await NativeModule.listDownloads();
     // REMOVING is an internal transient Media3 state, not a user-download state.
     return list.filter((item) => item.state !== 'removing');
   },
 
   async getDownload(id: string): Promise<DownloadInfo | null> {
-    if (Platform.OS !== 'android') return null;
+    if (!isNative) return null;
     return NativeModule.getDownload(id);
   },
 
   async getOfflineSource(
     params: PlaybackSourceParams
   ): Promise<OfflinePlaybackSource | null> {
-    if (Platform.OS !== 'android') return null;
+    if (!isNative) return null;
     return NativeModule.getOfflineSource(params);
   },
 
@@ -170,12 +176,12 @@ export const IcareOfflineDrm = {
   },
 
   async getStorageStats(): Promise<StorageStats> {
-    if (Platform.OS !== 'android') return { usedBytes: 0, downloadCount: 0 };
+    if (!isNative) return { usedBytes: 0, downloadCount: 0 };
     return NativeModule.getStorageStats();
   },
 
   async getDeviceStorageStats(): Promise<DeviceStorageStats> {
-    if (Platform.OS !== 'android') return { totalBytes: 0, freeBytes: 0, usedBytes: 0 };
+    if (!isNative) return { totalBytes: 0, freeBytes: 0, usedBytes: 0 };
     return NativeDownloadManager.getDeviceStorageStats();
   },
 
@@ -185,7 +191,7 @@ export const IcareOfflineDrm = {
     chapterId?: string | null;
     accessExpiresAt?: string | null;
   }): Promise<void> {
-    if (Platform.OS !== 'android') return;
+    if (!isNative) return;
     await NativeDownloadManager.setEntitlement(
       params.id,
       params.courseId ?? '',
@@ -195,7 +201,7 @@ export const IcareOfflineDrm = {
   },
 
   async getDownloadEntitlement(id: string): Promise<DownloadEntitlement | null> {
-    if (Platform.OS !== 'android') return null;
+    if (!isNative) return null;
     const value = await NativeDownloadManager.getEntitlement(id);
     if (!value || (!value.courseId && !value.chapterId && !value.accessExpiresAt)) return null;
     return value as DownloadEntitlement;
@@ -207,17 +213,17 @@ export const IcareOfflineDrm = {
    * for visibility, ordering and default audio/caption selection.
    */
   async setPreferredLanguages(codes: string[]): Promise<string[]> {
-    if (Platform.OS !== 'android') return codes.slice(0, 3);
+    if (!isNative) return codes.slice(0, 3);
     return NativeLanguagePreferences.setPreferredLanguages(codes);
   },
 
   async getPreferredLanguages(): Promise<string[]> {
-    if (Platform.OS !== 'android') return [];
+    if (!isNative) return [];
     return NativeLanguagePreferences.getPreferredLanguages();
   },
 
   async launchOfflinePlayer(id: string): Promise<void> {
-    ensureAndroid('launchOfflinePlayer');
+    ensureAndroidOnly('launchOfflinePlayer');
 
     // New downloads carry the authoritative Base44 course-entitlement expiry.
     // Legacy downloads have no entitlement metadata and remain backward-compatible.
@@ -241,10 +247,9 @@ type IcareDrmEvents = {
   onDownloadProgress: (e: DownloadProgressEvent) => void;
 };
 
-const emitter =
-  Platform.OS === 'android'
-    ? new EventEmitter<IcareDrmEvents>(NativeModule as any)
-    : null;
+const emitter = isNative
+  ? new EventEmitter<IcareDrmEvents>(NativeModule as any)
+  : null;
 
 export function onDownloadProgress(
   listener: (e: DownloadProgressEvent) => void

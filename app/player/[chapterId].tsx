@@ -383,6 +383,12 @@ export default function ChapterPlayerScreen() {
           const ch = dlInfo ? chapterFromDownload(chapterId, dlInfo) : { _id: chapterId, title: chapterId } as unknown as Chapter;
           setChapter(ch);
           setDownload(dlInfo);
+          if (Platform.OS === 'ios') {
+            // iOS: no native offline Activity — play the local .movpkg in the RN player.
+            setOffline(off);
+            setMode('offline');
+            return;
+          }
           try {
             await IcareOfflineDrm.launchOfflinePlayer(chapterId);
             // Activity launched — go back so the downloads screen is visible behind it.
@@ -466,17 +472,29 @@ export default function ChapterPlayerScreen() {
       return { uri: offline.uri, type: 'm3u8', cacheKey: offline.cacheKey } as ReactVideoSource;
     }
     if (mode === 'online' && tokens) {
+      // iOS only: non-DRM chapters return just { token } (no secureStreamUrl);
+      // build the Mux stream URL from the playback ID (signed streams add ?token=).
+      if (Platform.OS === 'ios' && !tokens.secureStreamUrl && chapter) {
+        const playbackId = selectMuxPlaybackId(chapter);
+        if (playbackId) {
+          const qs = chapter.muxSignedPlaybackRequired && tokens.token ? `?token=${tokens.token}` : '';
+          return { uri: `https://stream.mux.com/${playbackId}.m3u8${qs}`, type: 'm3u8' } as ReactVideoSource;
+        }
+        return null;
+      }
       return { uri: tokens.secureStreamUrl, type: 'm3u8' } as ReactVideoSource;
     }
     return null;
-  }, [mode, offline, tokens]);
+  }, [mode, offline, tokens, chapter]);
 
   // ── DRM config ──
   const drm = useMemo(() => {
     if (mode === 'offline' && offline) {
+      if (Platform.OS === 'ios') return undefined; // non-DRM offline copy
       return { type: 'widevine' as DRMType, offlineLicense: offline.offlineLicenseKeySetId };
     }
     if (mode === 'online' && tokens) {
+      if (Platform.OS === 'ios' && !tokens.drmLicenseUrl) return undefined; // plain HLS
       return {
         type: 'widevine' as DRMType,
         licenseServer: tokens.drmLicenseUrl,

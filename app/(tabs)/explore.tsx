@@ -666,8 +666,8 @@ export default function ExploreScreen() {
             chapter: msg.chapter as any,
             tokens: msg.tokens as any,
           });
-          if (Platform.OS === 'android') {
-            // On Android, react-native-video is disabled for online playback.
+          if (Platform.OS === 'android' || Platform.OS === 'ios') {
+            // On Android (and iOS), react-native-video is disabled for online playback.
             // Base44 WebView handles streaming natively — do NOT navigate to
             // the native player screen, which would interrupt playback by
             // showing the webview-fallback download drawer instead of the video.
