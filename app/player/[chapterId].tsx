@@ -6,6 +6,7 @@ import {
   ActivityIndicator,
   Alert,
   Animated,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -20,7 +21,7 @@ import {
   selectMuxPlaybackId,
   type Chapter,
 } from '../../api/base44Client';
-import { waitForPlayerData } from '../../api/playerCache';
+import { getPlayerError, waitForPlayerData } from '../../api/playerCache';
 import IcareOfflineDrm, {
   onDownloadProgress,
   type DownloadInfo,
@@ -34,6 +35,11 @@ interface MuxTokenResponse {
   drmToken: string;
   drmLicenseUrl: string;
   secureStreamUrl: string;
+}
+
+// iOS only: the getMuxToken function also requires courseId and chapterId.
+function muxIds(ch: Chapter) {
+  return Platform.OS === 'ios' ? { courseId: ch.courseId, chapterId: ch.id } : undefined;
 }
 
 export default function ChapterPlayerScreen() {
@@ -99,13 +105,17 @@ export default function ChapterPlayerScreen() {
         const playbackId = selectMuxPlaybackId(meta);
         if (!playbackId) throw new Error('Chapter has no Mux playback ID configured');
 
-        const tk = await getMuxToken(playbackId);
+        const tk = await getMuxToken(playbackId, muxIds(meta));
         if (cancelled) return;
         setTokens(tk);
         setMode('online');
       } catch (err: any) {
         if (cancelled) return;
-        setErrorMsg(err?.message ?? String(err));
+        let msg = err?.message ?? String(err);
+        // iOS only: also show why the WebView-side token fetch failed.
+        const webErr = Platform.OS === 'ios' && chapterId ? getPlayerError(chapterId) : undefined;
+        if (webErr) msg = `${msg} (web: ${webErr})`;
+        setErrorMsg(msg);
         setMode('error');
       }
     })();
@@ -192,7 +202,7 @@ export default function ChapterPlayerScreen() {
     const playbackId = selectMuxPlaybackId(chapter);
     if (!playbackId) return;
     try {
-      const tk = await getMuxToken(playbackId);
+      const tk = await getMuxToken(playbackId, muxIds(chapter));
       await IcareOfflineDrm.startDownload({
         id: chapter.id,
         manifestUrl: tk.secureStreamUrl,
@@ -214,7 +224,7 @@ export default function ChapterPlayerScreen() {
       const playbackId = selectMuxPlaybackId(chapter);
       if (playbackId) {
         try {
-          const tk = await getMuxToken(playbackId);
+          const tk = await getMuxToken(playbackId, muxIds(chapter));
           setTokens(tk);
           setMode('online');
         } catch (err: any) {

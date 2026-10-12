@@ -201,8 +201,11 @@ export function selectMuxPlaybackId(chapter: Chapter): string | null {
  * Always call selectMuxPlaybackId() first to pick the right playback ID.
  * Returns: { token, drmToken, drmLicenseUrl, secureStreamUrl }
  */
-export async function getMuxToken(playbackId: string): Promise<MuxTokenResponse> {
-  return apiPost<MuxTokenResponse>('/functions/getMuxToken', { playbackId }, true);
+export async function getMuxToken(
+  playbackId: string,
+  ids?: { courseId?: string; chapterId?: string }
+): Promise<MuxTokenResponse> {
+  return apiPost<MuxTokenResponse>('/functions/getMuxToken', { playbackId, ...(ids ?? {}) }, true);
 }
 
 /**

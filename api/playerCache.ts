@@ -27,6 +27,13 @@ const TIMEOUT_MS = 10_000;
 // Tokens that arrived before the player screen mounted.
 const store: Record<string, CachedPlayerData> = {};
 
+// Last bridge error per chapter (iOS only; used to make the error screen useful).
+const lastError: Record<string, string> = {};
+
+export function getPlayerError(chapterId: string): string | undefined {
+  return lastError[chapterId];
+}
+
 // Resolver callbacks waiting inside waitForPlayerData().
 const pending: Record<string, Array<(d: CachedPlayerData | null) => void>> = {};
 
@@ -71,8 +78,10 @@ export function waitForPlayerData(
  */
 export function deliverPlayerData(
   chapterId: string,
-  data: CachedPlayerData | null
+  data: CachedPlayerData | null,
+  error?: string
 ): void {
+  if (!data && error) lastError[chapterId] = error;
   const arr = pending[chapterId];
   if (arr && arr.length > 0) {
     arr.forEach((r) => r(data));

@@ -1,6 +1,6 @@
 import { useRouter, type Href } from 'expo-router';
 import { useCallback, useRef } from 'react';
-import { StyleSheet } from 'react-native';
+import { Platform, StyleSheet } from 'react-native';
 import { WebView, type WebViewMessageEvent } from 'react-native-webview';
 import type { ShouldStartLoadRequest } from 'react-native-webview/lib/WebViewTypes';
 import { deliverPlayerData } from '../../api/playerCache';
@@ -37,6 +37,15 @@ const INJECTED_JS = [
   '  async function fetchAndPostTokens(chapterId) {',
   '    try {',
   "      var hdrs = { 'Content-Type': 'application/json', 'api_key': _API_KEY };",
+  // iOS only: Base44 keeps the session as a bearer token in localStorage (not a cookie).
+  ...(Platform.OS === 'ios'
+    ? [
+        "      try {",
+        "        var _tk = window.localStorage.getItem('base44_access_token') || window.localStorage.getItem('token');",
+        "        if (_tk) hdrs['Authorization'] = 'Bearer ' + _tk;",
+        "      } catch (_e) {}",
+      ]
+    : []),
   "      var chRes = await fetch(_BASE_API + '/entities/Chapter/' + chapterId,",
   "        { headers: hdrs, credentials: 'include' });",
   "      if (!chRes.ok) throw new Error('Chapter fetch failed (' + chRes.status + ')');",
@@ -48,7 +57,10 @@ const INJECTED_JS = [
   "      if (!playbackId) throw new Error('Chapter has no Mux playback ID');",
   "      var tkRes = await fetch(_BASE_API + '/functions/getMuxToken', {",
   "        method: 'POST', headers: hdrs, credentials: 'include',",
-  '        body: JSON.stringify({ playbackId: playbackId }) });',
+  // iOS only: getMuxToken also requires courseId and chapterId.
+  Platform.OS === 'ios'
+    ? '        body: JSON.stringify({ playbackId: playbackId, courseId: chapter.courseId, chapterId: chapter.id || chapterId }) });'
+    : '        body: JSON.stringify({ playbackId: playbackId }) });',
   '      if (!tkRes.ok) {',
   '        var eb = {}; try { eb = await tkRes.json(); } catch(x) {}',
   "        throw new Error(eb.error || ('getMuxToken failed (' + tkRes.status + ')'));",
@@ -133,7 +145,11 @@ export default function ExploreScreen() {
         } else if (msg?.type === 'CHAPTER_TOKENS' && typeof msg.chapterId === 'string') {
           deliverPlayerData(msg.chapterId, { chapter: msg.chapter, tokens: msg.tokens });
         } else if (msg?.type === 'CHAPTER_ERROR' && typeof msg.chapterId === 'string') {
-          deliverPlayerData(msg.chapterId, null);
+          deliverPlayerData(
+            msg.chapterId,
+            null,
+            Platform.OS === 'ios' && typeof msg.error === 'string' ? msg.error : undefined
+          );
         }
       } catch {
         // Non-JSON WebView messages are silently ignored
