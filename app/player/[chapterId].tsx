@@ -174,10 +174,20 @@ export default function ChapterPlayerScreen() {
       } as ReactVideoSource;
     }
     if (mode === 'online' && tokens) {
+      // iOS only: non-DRM chapters return just { token } with no secureStreamUrl,
+      // so build the Mux stream URL from the playback ID (signed streams append the token).
+      if (Platform.OS === 'ios' && !tokens.secureStreamUrl && chapter) {
+        const playbackId = selectMuxPlaybackId(chapter);
+        if (playbackId) {
+          const qs = chapter.muxSignedPlaybackRequired && tokens.token ? `?token=${tokens.token}` : '';
+          return { uri: `https://stream.mux.com/${playbackId}.m3u8${qs}`, type: 'm3u8' } as ReactVideoSource;
+        }
+        return null;
+      }
       return { uri: tokens.secureStreamUrl, type: 'm3u8' } as ReactVideoSource;
     }
     return null;
-  }, [mode, offline, tokens]);
+  }, [mode, offline, tokens, chapter]);
 
   // ----- DRM block -----
   const drm = useMemo(() => {
@@ -188,6 +198,7 @@ export default function ChapterPlayerScreen() {
       };
     }
     if (mode === 'online' && tokens) {
+      if (Platform.OS === 'ios' && !tokens.drmLicenseUrl) return undefined;
       return {
         type: 'widevine' as DRMType,
         licenseServer: tokens.drmLicenseUrl,
