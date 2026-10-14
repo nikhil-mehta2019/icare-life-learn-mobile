@@ -15,6 +15,10 @@ struct StartDownloadParams: Record {
   @Field var durationSeconds: Double? = nil
   @Field var audioLanguages: [String]? = nil
   @Field var captionLanguages: [String]? = nil
+  // iOS FairPlay (offline persistable key)
+  @Field var fairplayLicenseUrl: String? = nil
+  @Field var fairplayCertificateUrl: String? = nil
+  @Field var licenseExpiresAt: String? = nil
 }
 
 struct PlaybackSourceParams: Record {
@@ -190,6 +194,8 @@ private struct StoredDownload: Codable {
   var percent: Double
   var failureReason: String?
   var downloadedAt: String?
+  var drmType: String?          // "fairplay" for protected downloads
+  var licenseExpiresAt: String? // entitlement cutoff reported by the backend
 }
 
 final class OfflineDownloadManager: NSObject, AVAssetDownloadDelegate {
@@ -201,6 +207,8 @@ final class OfflineDownloadManager: NSObject, AVAssetDownloadDelegate {
   private let defaultsKey = "life.icare.offline.downloads.v1"
   private var stored: [String: StoredDownload] = [:]
   private var tasks: [String: AVAssetDownloadTask] = [:]
+  /// Keeps the FairPlay key session + delegate alive while a protected download runs.
+  private var keySessions: [String: (AVContentKeySession, FairPlayDownloadKeyDelegate)] = [:]
 
   private lazy var session: AVAssetDownloadURLSession = {
     let config = URLSessionConfiguration.background(withIdentifier: "life.icare.offline.downloads")
@@ -222,11 +230,19 @@ final class OfflineDownloadManager: NSObject, AVAssetDownloadDelegate {
   func start(params: StartDownloadParams) async throws {
     let id = params.id
     guard !id.isEmpty else { throw OfflineDownloadError(message: "Missing download id") }
-    if !params.drmLicenseUrl.isEmpty {
-      // FairPlay offline (persistent content keys) is not implemented yet.
-      throw OfflineDownloadError(
-        message: "Offline download of DRM-protected lessons is not available on iOS yet."
-      )
+    let wantsDrm = !params.drmLicenseUrl.isEmpty
+      || !(params.fairplayLicenseUrl ?? "").isEmpty
+      || !(params.fairplayCertificateUrl ?? "").isEmpty
+    var fairPlay: (license: URL, certificate: URL)? = nil
+    if wantsDrm {
+      guard let licenseString = params.fairplayLicenseUrl, let license = URL(string: licenseString),
+            let certString = params.fairplayCertificateUrl, let certificate = URL(string: certString)
+      else {
+        throw OfflineDownloadError(
+          message: "Offline download of DRM-protected lessons is not available on iOS yet."
+        )
+      }
+      fairPlay = (license, certificate)
     }
     guard let url = URL(string: params.manifestUrl), url.scheme?.hasPrefix("http") == true else {
       throw OfflineDownloadError(message: "Invalid stream URL")
@@ -239,6 +255,24 @@ final class OfflineDownloadManager: NSObject, AVAssetDownloadDelegate {
     requestNotificationPermissionIfNeeded()
 
     let asset = AVURLAsset(url: url)
+
+    // FairPlay: obtain a persistable content key while the HLS download runs.
+    if let fairPlay = fairPlay {
+      let delegate = FairPlayDownloadKeyDelegate(
+        downloadId: id,
+        certificateUrl: fairPlay.certificate,
+        licenseUrl: fairPlay.license,
+        drmToken: params.drmToken.isEmpty ? nil : params.drmToken
+      )
+      delegate.onFailure = { [weak self] reason in
+        DispatchQueue.main.async { self?.failDownload(id: id, reason: reason) }
+      }
+      let keySession = AVContentKeySession(keySystem: .fairPlayStreaming)
+      keySession.setDelegate(delegate, queue: DispatchQueue.main)
+      keySession.addContentKeyRecipient(asset)
+      keySessions[id] = (keySession, delegate)
+    }
+
     let config = AVAssetDownloadConfiguration(asset: asset, title: params.title ?? "Lesson")
 
     // Honour the learner's audio/caption language choice when the stream offers it.
@@ -257,7 +291,9 @@ final class OfflineDownloadManager: NSObject, AVAssetDownloadDelegate {
     var record = StoredDownload(
       id: id, state: "queued", manifestUrl: params.manifestUrl, title: params.title,
       thumbnailUrl: params.thumbnailUrl, durationSeconds: params.durationSeconds,
-      relativePath: nil, percent: 0, failureReason: nil, downloadedAt: nil
+      relativePath: nil, percent: 0, failureReason: nil, downloadedAt: nil,
+      drmType: fairPlay != nil ? "fairplay" : nil,
+      licenseExpiresAt: params.licenseExpiresAt
     )
     stored[id] = record
     save()
@@ -289,6 +325,8 @@ final class OfflineDownloadManager: NSObject, AVAssetDownloadDelegate {
   func remove(id: String) {
     tasks[id]?.cancel()
     tasks[id] = nil
+    keySessions[id] = nil
+    FairPlayKeychain.delete(id: id)
     if let record = stored[id] {
       if let url = resolveLocation(record) {
         try? FileManager.default.removeItem(at: url)
@@ -317,6 +355,7 @@ final class OfflineDownloadManager: NSObject, AVAssetDownloadDelegate {
       "cacheKey": id,
       "uri": url.absoluteString,
       "offlineLicenseKeySetId": "",
+      "drmType": record.drmType,
     ]
   }
 
@@ -387,6 +426,7 @@ final class OfflineDownloadManager: NSObject, AVAssetDownloadDelegate {
   func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
     guard let id = task.taskDescription, var record = stored[id] else { return }
     tasks[id] = nil
+    keySessions[id] = nil
     if let error = error as NSError? {
       if error.domain == NSURLErrorDomain && error.code == NSURLErrorCancelled {
         // Cancelled by remove(); record is already gone or reset.
@@ -394,6 +434,10 @@ final class OfflineDownloadManager: NSObject, AVAssetDownloadDelegate {
       }
       record.state = "failed"
       record.failureReason = error.localizedDescription
+      notify(title: "Download failed", body: record.title ?? "Lesson", id: id)
+    } else if record.drmType == "fairplay" && !FairPlayKeychain.exists(id: id) {
+      record.state = "failed"
+      record.failureReason = "The protected lesson downloaded but its licence key was not stored."
       notify(title: "Download failed", body: record.title ?? "Lesson", id: id)
     } else {
       record.state = "completed"
@@ -476,6 +520,19 @@ final class OfflineDownloadManager: NSObject, AVAssetDownloadDelegate {
 
   // MARK: Helpers
 
+  private func failDownload(id: String, reason: String) {
+    tasks[id]?.cancel()
+    tasks[id] = nil
+    keySessions[id] = nil
+    guard var record = stored[id] else { return }
+    record.state = "failed"
+    record.failureReason = reason
+    stored[id] = record
+    save()
+    emit(record)
+    notify(title: "Download failed", body: record.title ?? "Lesson", id: id)
+  }
+
   private func remember(location: URL, for task: AVAssetDownloadTask) {
     guard let id = task.taskDescription, var record = stored[id] else { return }
     record.relativePath = location.relativePath
@@ -514,6 +571,8 @@ final class OfflineDownloadManager: NSObject, AVAssetDownloadDelegate {
       "downloadedAt": record.downloadedAt,
       "thumbnailUrl": record.thumbnailUrl,
       "durationSeconds": record.durationSeconds,
+      "drmType": record.drmType,
+      "licenseExpiresAt": record.licenseExpiresAt,
     ]
   }
 
@@ -532,5 +591,194 @@ final class OfflineDownloadManager: NSObject, AVAssetDownloadDelegate {
     if let data = try? JSONEncoder().encode(stored) {
       UserDefaults.standard.set(data, forKey: defaultsKey)
     }
+  }
+}
+
+// MARK: - FairPlay offline keys
+
+/// Stores the persistable FairPlay content key per download in the Keychain.
+enum FairPlayKeychain {
+  private static let service = "life.icare.offline.fairplay.keys"
+
+  private static func query(_ id: String) -> [String: Any] {
+    return [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: service,
+      kSecAttrAccount as String: id,
+    ]
+  }
+
+  static func save(_ data: Data, id: String) {
+    SecItemDelete(query(id) as CFDictionary)
+    var item = query(id)
+    item[kSecValueData as String] = data
+    item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+    SecItemAdd(item as CFDictionary, nil)
+  }
+
+  static func load(id: String) -> Data? {
+    var q = query(id)
+    q[kSecReturnData as String] = true
+    q[kSecMatchLimit as String] = kSecMatchLimitOne
+    var result: AnyObject?
+    guard SecItemCopyMatching(q as CFDictionary, &result) == errSecSuccess else { return nil }
+    return result as? Data
+  }
+
+  static func exists(id: String) -> Bool { return load(id: id) != nil }
+
+  static func delete(id: String) {
+    SecItemDelete(query(id) as CFDictionary)
+  }
+}
+
+/// Answers the key requests raised while an HLS asset is being downloaded:
+/// fetch the app certificate, build the SPC, exchange it for a CKC at the
+/// licence server, persist the resulting offline key.
+final class FairPlayDownloadKeyDelegate: NSObject, AVContentKeySessionDelegate {
+  private let downloadId: String
+  private let certificateUrl: URL
+  private let licenseUrl: URL
+  private let drmToken: String?
+  var onFailure: ((String) -> Void)?
+  private var certificate: Data?
+
+  init(downloadId: String, certificateUrl: URL, licenseUrl: URL, drmToken: String?) {
+    self.downloadId = downloadId
+    self.certificateUrl = certificateUrl
+    self.licenseUrl = licenseUrl
+    self.drmToken = drmToken
+    super.init()
+  }
+
+  // Ask for a persistable key so the licence can be reused offline.
+  func contentKeySession(_ session: AVContentKeySession, didProvide keyRequest: AVContentKeyRequest) {
+    do {
+      try keyRequest.respondByRequestingPersistableContentKeyRequestAndReturnError()
+    } catch {
+      onFailure?("FairPlay: could not request a persistable key (\(error.localizedDescription))")
+    }
+  }
+
+  func contentKeySession(
+    _ session: AVContentKeySession, didProvide keyRequest: AVPersistableContentKeyRequest
+  ) {
+    guard let identifier = keyRequest.identifier as? String,
+          let skd = URL(string: identifier),
+          let contentId = (skd.host ?? identifier).data(using: .utf8)
+    else {
+      onFailure?("FairPlay: missing content key identifier")
+      return
+    }
+
+    fetchCertificate { [weak self] result in
+      guard let self = self else { return }
+      switch result {
+      case .failure(let error):
+        self.onFailure?("FairPlay certificate: \(error.localizedDescription)")
+      case .success(let certificate):
+        keyRequest.makeStreamingContentKeyRequestData(
+          forApp: certificate,
+          contentIdentifier: contentId,
+          options: [AVContentKeyRequestProtocolVersionsKey: [1]]
+        ) { spc, error in
+          guard let spc = spc, error == nil else {
+            self.onFailure?("FairPlay SPC: \(error?.localizedDescription ?? "unknown error")")
+            return
+          }
+          self.requestKeyResponse(spc: spc) { ckcResult in
+            switch ckcResult {
+            case .failure(let error):
+              self.onFailure?("FairPlay licence: \(error.localizedDescription)")
+            case .success(let ckc):
+              do {
+                let persistentKey = try keyRequest.persistableContentKey(
+                  fromKeyVendorResponse: ckc, options: nil
+                )
+                FairPlayKeychain.save(persistentKey, id: self.downloadId)
+                keyRequest.processContentKeyResponse(
+                  AVContentKeyResponse(fairPlayStreamingKeyResponseData: persistentKey)
+                )
+              } catch {
+                self.onFailure?("FairPlay key: \(error.localizedDescription)")
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  func contentKeySession(
+    _ session: AVContentKeySession, contentKeyRequest keyRequest: AVContentKeyRequest,
+    didFailWithError err: Error
+  ) {
+    onFailure?("FairPlay: \(err.localizedDescription)")
+  }
+
+  // MARK: Networking
+
+  private func fetchCertificate(_ completion: @escaping (Result<Data, Error>) -> Void) {
+    if let certificate = certificate { return completion(.success(certificate)) }
+    var request = URLRequest(url: withToken(certificateUrl))
+    request.timeoutInterval = 30
+    if let token = drmToken { request.setValue(token, forHTTPHeaderField: "x-mux-license-token") }
+    URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+      if let error = error { return completion(.failure(error)) }
+      guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+            let data = data, !data.isEmpty
+      else {
+        let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+        return completion(.failure(OfflineDownloadError(message: "certificate request failed (HTTP \(code))")))
+      }
+      self?.certificate = data
+      completion(.success(data))
+    }.resume()
+  }
+
+  private func requestKeyResponse(spc: Data, _ completion: @escaping (Result<Data, Error>) -> Void) {
+    var request = URLRequest(url: withToken(licenseUrl))
+    request.httpMethod = "POST"
+    request.timeoutInterval = 30
+    request.httpBody = spc
+    request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+    if let token = drmToken { request.setValue(token, forHTTPHeaderField: "x-mux-license-token") }
+    URLSession.shared.dataTask(with: request) { data, response, error in
+      if let error = error { return completion(.failure(error)) }
+      guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+            let data = data, !data.isEmpty
+      else {
+        let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+        return completion(.failure(OfflineDownloadError(message: "licence request failed (HTTP \(code))")))
+      }
+      completion(.success(FairPlayDownloadKeyDelegate.normalizeKeyResponse(data)))
+    }.resume()
+  }
+
+  /// Some servers answer with the CKC base64-encoded (optionally wrapped in <ckc> tags).
+  private static func normalizeKeyResponse(_ data: Data) -> Data {
+    guard var text = String(data: data, encoding: .utf8) else { return data }
+    text = text.replacingOccurrences(of: "<ckc>", with: "")
+      .replacingOccurrences(of: "</ckc>", with: "")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=")
+    if !text.isEmpty, text.unicodeScalars.allSatisfy({ allowed.contains($0) }),
+       let decoded = Data(base64Encoded: text) {
+      return decoded
+    }
+    return data
+  }
+
+  /// Mux accepts the licence JWT as a `token` query parameter; add it when missing.
+  private func withToken(_ url: URL) -> URL {
+    guard let token = drmToken, !token.isEmpty,
+          var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+    else { return url }
+    var items = components.queryItems ?? []
+    if !items.contains(where: { $0.name == "token" }) {
+      items.append(URLQueryItem(name: "token", value: token))
+      components.queryItems = items
+    }
+    return components.url ?? url
   }
 }

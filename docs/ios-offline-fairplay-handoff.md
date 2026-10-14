@@ -18,7 +18,8 @@ This document hands the iOS offline-download work over for the **FairPlay (DRM)*
 | Non-DRM HLS download (progress, persist across relaunch, remove, storage stats) | **Implemented**; verified end to end on the earlier SDK 54 prototype with the same download core. **Not yet re-verified end to end on v2** — see section 5 |
 | Offline playback of a downloaded non-DRM lesson | Implemented (RN player plays the local `.movpkg`); verified on the SDK 54 prototype |
 | Online playback | Stays in the WebView (the web app plays it), same as Android |
-| **DRM (FairPlay) download / playback** | **Not implemented** — rejected with a clear message |
+| **DRM (FairPlay) download** | **Implemented, type-checked only — NOT yet run on a device.** `AVContentKeySession` persistable key, stored in the Keychain; see section 3a |
+| **DRM (FairPlay) offline playback** | **Not implemented** — protected offline copies show a clear message instead of playing |
 
 ### Why FairPlay is the critical path
 The server's download endpoint (`getMuxDownloadToken`) returns `drmEnabled` and a Widevine license URL. For the ADL course ("Senior Care Essentials: Activities of Daily Living", a `drm`-mode course) every lesson came back as DRM for the download path, so **none of that course can be downloaded on iOS without FairPlay**. Catalog-wide (read-only counts, 2026-10-12): 862 published chapters, 245 DRM-protected, 2 of 23 courses in `drm` mode.
@@ -49,6 +50,21 @@ The server's download endpoint (`getMuxDownloadToken`) returns `drmEnabled` and 
 ---
 
 ## 3. FairPlay plan
+
+### 3a. Status of the FairPlay code (added after the backend change in `c97ce62`)
+
+Backend (Nikhil): `getMuxDownloadToken` now returns `fairplayLicenseUrl`, `fairplayCertificateUrl` and `licenseExpiresAt`, and accepts an optional `platform`.
+
+Client, this branch:
+- `utils/offlineDownload.ts` passes `platform: 'ios'` (iOS only) and forwards the three fields to `startDownload` **only when `drmEnabled`** is true (Android request/payload unchanged).
+- `IcareOfflineDrmModule.swift`: `FairPlayDownloadKeyDelegate` + `FairPlayKeychain`. During the HLS download it requests a *persistable* key, fetches the certificate, builds the SPC, POSTs it to the licence URL (token added as `?token=` and `x-mux-license-token` if absent), stores the key in the Keychain. A protected download is marked `completed` only if its key was stored; otherwise `failed` with a reason.
+- Protected offline copies report `drmType: "fairplay"`; the player shows "Offline playback of protected lessons is not available on iOS yet." until P3.
+
+**Unverified assumptions (check first on a real iPhone):**
+1. Content identifier = host of the `skd://` key URI (Apple sample convention). Mux may expect something else.
+2. Certificate GET and licence POST formats (raw SPC body, raw or base64 CKC, token as query vs header).
+3. `AVContentKeyRequestProtocolVersionsKey: [1]`.
+4. Whether the key request is raised at all during `AVAssetDownloadURLSession` with the recipient set on the same `AVURLAsset`.
 
 ### Prerequisites (non-code, long lead time — start first)
 1. **Apple FairPlay Streaming (FPS) deployment package** for the Apple Developer account (request + approval can take days).
@@ -99,6 +115,7 @@ After one successful build, `swiftc -typecheck` against `ios/Pods` headers and t
 
 ## 5. Not yet done / to verify
 
+- **FairPlay download has never been executed** (simulator cannot run FairPlay; no device was available). Treat section 3a as a starting point, not a verified feature.
 - **End-to-end non-DRM download on v2.** Needs a lesson from a **public-mode** course on the test account (the ADL course is DRM for downloads). Cycle to run: Add Downloads → progress → My Downloads → relaunch → play offline → remove. The same download core already passed this on the SDK 54 prototype.
 - **Android regression check** before merging: the shared JS files changed (`index.ts`, `explore.tsx`, `[chapterId].tsx`, `offlineDownload.ts`); all changes are `Platform.OS`-gated or additive, but they have not been run on an Android device.
 - Background-session relaunch handling (`handleEventsForBackgroundURLSession` in the app delegate) is not implemented; downloads resume when the app returns to the foreground.
