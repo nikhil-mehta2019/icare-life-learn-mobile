@@ -1,3 +1,4 @@
+import { Platform } from 'react-native';
 import type { Chapter } from '../api/base44Client';
 import { fetchUserPreferences, getMuxDownloadToken, selectMuxPlaybackId } from '../api/base44Client';
 import IcareOfflineDrm from '../modules/icare-offline-drm';
@@ -44,7 +45,12 @@ export async function queueChapterForOffline(chapter: Chapter, jwt: string): Pro
   if (!playbackId) throw new Error(`${chapter.title} has no downloadable video.`);
 
   const [tokens, preferences] = await Promise.all([
-    getMuxDownloadToken(playbackId, jwt, chapter.courseId),
+    getMuxDownloadToken(
+      playbackId,
+      jwt,
+      chapter.courseId,
+      Platform.OS === 'ios' ? 'ios' : undefined,
+    ),
     fetchUserPreferences(jwt).catch(() => null),
   ]);
 
@@ -56,11 +62,24 @@ export async function queueChapterForOffline(chapter: Chapter, jwt: string): Pro
       ? [preferences.primaryLanguage]
       : [];
 
+  // iOS only: the endpoint returns a Widevine license URL for every lesson of a
+  // DRM-mode course, including lessons that are not DRM-protected. Only pass DRM
+  // fields on iOS when the lesson really is DRM, so plain HLS can be downloaded.
+  const treatAsDrm = Platform.OS !== 'ios' || tokens.drmEnabled;
+
   await IcareOfflineDrm.startDownload({
     id: chapter.id,
     manifestUrl: tokens.manifestUrl,
-    drmLicenseUrl: tokens.widevineLicenseUrl ?? '',
-    drmToken: tokens.drmToken ?? '',
+    drmLicenseUrl: treatAsDrm ? (tokens.widevineLicenseUrl ?? '') : '',
+    drmToken: treatAsDrm ? (tokens.drmToken ?? '') : '',
+    // iOS only: FairPlay endpoints, sent only when the lesson is really DRM.
+    ...(Platform.OS === 'ios' && tokens.drmEnabled
+      ? {
+          fairplayLicenseUrl: tokens.fairplayLicenseUrl ?? undefined,
+          fairplayCertificateUrl: tokens.fairplayCertificateUrl ?? undefined,
+          licenseExpiresAt: tokens.licenseExpiresAt ?? tokens.courseAccessExpiresAt ?? undefined,
+        }
+      : {}),
     title: chapter.title,
     thumbnailUrl: chapter.videoPosterUrl ?? undefined,
     durationSeconds: chapter.estimatedMinutes

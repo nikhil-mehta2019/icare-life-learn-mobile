@@ -5,6 +5,6 @@
   "main": "index.ts",
   "private": true,
   "expo": {
-    "platforms": ["android"]
+    "platforms": ["android", "ios"]
   }
 }

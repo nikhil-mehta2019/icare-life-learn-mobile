@@ -101,6 +101,9 @@ export interface MuxDownloadTokenResponse {
   manifestUrl: string;
   drmToken: string | null;
   widevineLicenseUrl: string | null;
+  fairplayLicenseUrl: string | null;
+  fairplayCertificateUrl: string | null;
+  licenseExpiresAt?: string | null;
   audioLanguages: string[];
   captionLanguages: string[];
   courseId?: string | null;
@@ -216,7 +219,8 @@ export async function getMuxToken(playbackId: string): Promise<MuxTokenResponse>
 export async function getMuxDownloadToken(
   playbackId: string,
   jwt?: string,
-  courseId?: string
+  courseId?: string,
+  platform?: string
 ): Promise<MuxDownloadTokenResponse> {
   if (!jwt) {
     throw new Error('Your session must be refreshed before downloading. Please reconnect and try again.');
@@ -231,7 +235,7 @@ export async function getMuxDownloadToken(
     // courseId disambiguates chapters that share a playbackId across courses
     // (e.g. the same Mux asset reused in two courses) so the server resolves
     // access against the course the learner actually selected.
-    body: JSON.stringify(courseId ? { playbackId, courseId } : { playbackId }),
+    body: JSON.stringify({ playbackId, ...(courseId ? { courseId } : {}), ...(platform ? { platform } : {}) }),
   });
   const data = await response.json().catch(() => ({} as any));
   if (!response.ok) {
@@ -254,7 +258,10 @@ export async function getMuxDownloadToken(
     drmEnabled: !!d.drmEnabled,
     manifestUrl: d.manifestUrl ?? '',
     drmToken: d.drmToken ?? '',
-    widevineLicenseUrl: d.widevineLicenseUrl ?? '',
+    widevineLicenseUrl: d.widevineLicenseUrl ?? null,
+    fairplayLicenseUrl: d.fairplayLicenseUrl ?? null,
+    fairplayCertificateUrl: d.fairplayCertificateUrl ?? null,
+    licenseExpiresAt: d.licenseExpiresAt ?? null,
     // The Course App authorization endpoint intentionally need not expose the
     // upstream catalogue. The caller can pass the learner's preferred codes;
     // native playback still filters to tracks actually present in the download.
