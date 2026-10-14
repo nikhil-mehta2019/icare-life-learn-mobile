@@ -45,7 +45,12 @@ export async function queueChapterForOffline(chapter: Chapter, jwt: string): Pro
   if (!playbackId) throw new Error(`${chapter.title} has no downloadable video.`);
 
   const [tokens, preferences] = await Promise.all([
-    getMuxDownloadToken(playbackId, jwt, chapter.courseId),
+    getMuxDownloadToken(
+      playbackId,
+      jwt,
+      chapter.courseId,
+      Platform.OS === 'ios' ? 'ios' : undefined,
+    ),
     fetchUserPreferences(jwt).catch(() => null),
   ]);
 
@@ -67,6 +72,14 @@ export async function queueChapterForOffline(chapter: Chapter, jwt: string): Pro
     manifestUrl: tokens.manifestUrl,
     drmLicenseUrl: treatAsDrm ? (tokens.widevineLicenseUrl ?? '') : '',
     drmToken: treatAsDrm ? (tokens.drmToken ?? '') : '',
+    // iOS only: FairPlay endpoints, sent only when the lesson is really DRM.
+    ...(Platform.OS === 'ios' && tokens.drmEnabled
+      ? {
+          fairplayLicenseUrl: tokens.fairplayLicenseUrl ?? undefined,
+          fairplayCertificateUrl: tokens.fairplayCertificateUrl ?? undefined,
+          licenseExpiresAt: tokens.licenseExpiresAt ?? tokens.courseAccessExpiresAt ?? undefined,
+        }
+      : {}),
     title: chapter.title,
     thumbnailUrl: chapter.videoPosterUrl ?? undefined,
     durationSeconds: chapter.estimatedMinutes

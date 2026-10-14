@@ -384,6 +384,9 @@ export default function ChapterPlayerScreen() {
           setChapter(ch);
           setDownload(dlInfo);
           if (Platform.OS === 'ios') {
+            if (off.drmType === 'fairplay') {
+              throw new Error('Offline playback of protected lessons is not available on iOS yet.');
+            }
             // iOS: no native offline Activity — play the local .movpkg in the RN player.
             setOffline(off);
             setMode('offline');

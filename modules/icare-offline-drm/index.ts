@@ -33,6 +33,10 @@ export interface StartDownloadParams {
   durationSeconds?: number;
   audioLanguages?: string[];
   captionLanguages?: string[];
+  /** iOS FairPlay only: license/certificate endpoints and entitlement cutoff. */
+  fairplayLicenseUrl?: string;
+  fairplayCertificateUrl?: string;
+  licenseExpiresAt?: string;
 }
 
 export interface PlaybackSourceParams {
@@ -43,6 +47,8 @@ export interface OfflinePlaybackSource {
   cacheKey: string;
   uri: string;
   offlineLicenseKeySetId: string;
+  /** iOS only: 'fairplay' for protected downloads (key stored in the Keychain). */
+  drmType?: 'fairplay' | null;
 }
 
 export interface StorageStats {
