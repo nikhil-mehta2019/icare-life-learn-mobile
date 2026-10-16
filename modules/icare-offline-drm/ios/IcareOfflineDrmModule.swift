@@ -243,6 +243,14 @@ final class OfflineDownloadManager: NSObject, AVAssetDownloadDelegate {
         )
       }
       fairPlay = (license, certificate)
+      #if targetEnvironment(simulator)
+      // AVContentKeySession raises an uncatchable NSInvalidArgumentException for
+      // FairPlay in the Simulator (key system unsupported). Fail with a message
+      // instead of crashing; protected downloads need a physical iPhone.
+      throw OfflineDownloadError(
+        message: "Protected lessons can only be downloaded on a physical iPhone, not in the Simulator."
+      )
+      #endif
     }
     guard let url = URL(string: params.manifestUrl), url.scheme?.hasPrefix("http") == true else {
       throw OfflineDownloadError(message: "Invalid stream URL")

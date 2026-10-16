@@ -60,6 +60,8 @@ Client, this branch:
 - `IcareOfflineDrmModule.swift`: `FairPlayDownloadKeyDelegate` + `FairPlayKeychain`. During the HLS download it requests a *persistable* key, fetches the certificate, builds the SPC, POSTs it to the licence URL (token added as `?token=` and `x-mux-license-token` if absent), stores the key in the Keychain. A protected download is marked `completed` only if its key was stored; otherwise `failed` with a reason.
 - Protected offline copies report `drmType: "fairplay"`; the player shows "Offline playback of protected lessons is not available on iOS yet." until P3.
 
+**Simulator behaviour (observed 2026-10-16):** in the Simulator the backend returned the FairPlay URLs and `startDownload` reached the native module, but `AVContentKeySession(keySystem: .fairPlayStreaming)` raised an uncatchable `NSInvalidArgumentException` (key system unsupported) and killed the app. The module now guards this with `#if targetEnvironment(simulator)` and reports "Protected lessons can only be downloaded on a physical iPhone, not in the Simulator." Real devices are unaffected.
+
 **Unverified assumptions (check first on a real iPhone):**
 1. Content identifier = host of the `skd://` key URI (Apple sample convention). Mux may expect something else.
 2. Certificate GET and licence POST formats (raw SPC body, raw or base64 CKC, token as query vs header).
