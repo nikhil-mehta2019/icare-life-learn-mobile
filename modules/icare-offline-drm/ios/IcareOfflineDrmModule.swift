@@ -448,11 +448,20 @@ final class OfflineDownloadManager: NSObject, AVAssetDownloadDelegate {
       record.state = "failed"
       record.failureReason = error.localizedDescription
       notify(title: "Download failed", body: record.title ?? "Lesson", id: id)
-    } else if record.drmType == "fairplay" && !FairPlayKeychain.exists(id: id) {
+    } else if record.drmType == "fairplay"
+                && downloadDeclaresFairPlayKeys(record)
+                && !FairPlayKeychain.exists(id: id) {
+      // The stream really is FairPlay-encrypted but no persistable key was stored.
       record.state = "failed"
       record.failureReason = "The protected lesson downloaded but its licence key was not stored."
+      FairPlayDiag.log(id, "FAILED: playlists declare FairPlay keys but none was stored")
       notify(title: "Download failed", body: record.title ?? "Lesson", id: id)
     } else {
+      if record.drmType == "fairplay" && !downloadDeclaresFairPlayKeys(record) {
+        // DRM course, but this lesson's stream is not encrypted: treat as a plain download.
+        FairPlayDiag.log(id, "playlists declare no FairPlay keys: clear content, completing without a key")
+        record.drmType = nil
+      }
       record.state = "completed"
       record.percent = 100
       record.failureReason = nil
@@ -551,6 +560,27 @@ final class OfflineDownloadManager: NSObject, AVAssetDownloadDelegate {
     record.relativePath = location.relativePath
     stored[id] = record
     save()
+  }
+
+  /// True when any downloaded playlist declares a FairPlay key (EXT-X-KEY / SESSION-KEY
+  /// with the com.apple.streamingkeydelivery key format). Used to tell an encrypted
+  /// lesson from a plain one inside a DRM-mode course.
+  private func downloadDeclaresFairPlayKeys(_ record: StoredDownload) -> Bool {
+    guard let root = resolveLocation(record),
+          let walker = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)
+    else { return true } // cannot inspect: stay strict
+    var scanned = 0
+    for case let file as URL in walker where file.pathExtension.lowercased() == "m3u8" {
+      scanned += 1
+      guard let text = try? String(contentsOf: file, encoding: .utf8) else { continue }
+      if text.contains("com.apple.streamingkeydelivery")
+          || text.contains("#EXT-X-SESSION-KEY") {
+        FairPlayDiag.log(record.id, "playlist declares FairPlay key (\(scanned) playlists scanned)")
+        return true
+      }
+    }
+    FairPlayDiag.log(record.id, "no FairPlay key declared in \(scanned) playlists")
+    return false
   }
 
   private func resolveLocation(_ record: StoredDownload) -> URL? {
