@@ -55,6 +55,7 @@ import { deliverPlayerData, deliverPlayerError } from '../../api/playerCache';
 import { API_KEY, BASE_URL } from '../../api/base44Client';
 import IcareOfflineDrm from '../../modules/icare-offline-drm';
 import { IOS_WEB_FULLSCREEN_POLYFILL } from '../../utils/webFullscreenPolyfill';
+import { setWebFullscreen } from '../../store/webFullscreen';
 
 const BASE44_URL = 'https://icare-life-learn.base44.app';
 
@@ -616,6 +617,12 @@ const IOS_FULLSCREEN_JS = `
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export default function ExploreScreen() {
+  // iOS: never leave the tab bar hidden / the app landscape if this screen goes away mid full screen.
+  useEffect(() => () => {
+    if (Platform.OS !== 'ios') return;
+    setWebFullscreen(false);
+    IcareOfflineDrm.setFullscreenLandscape(false);
+  }, []);
   const router = useRouter();
   const webRef = useRef<WebView>(null);
 
@@ -786,7 +793,10 @@ export default function ExploreScreen() {
         case 'FULLSCREEN_CHANGE':
           // iOS: the web player went full screen / back (see IOS_FULLSCREEN_JS).
           console.log(`[explore] FULLSCREEN_CHANGE active=${String(msg.active)} source=${String(msg.source)}`);
-          if (Platform.OS === 'ios') IcareOfflineDrm.setFullscreenLandscape(!!msg.active);
+          if (Platform.OS === 'ios') {
+            setWebFullscreen(!!msg.active);
+            IcareOfflineDrm.setFullscreenLandscape(!!msg.active);
+          }
           break;
 
         case 'FS_DIAG':
@@ -855,6 +865,12 @@ export default function ExploreScreen() {
       allowsFullscreenVideo
       mediaPlaybackRequiresUserAction={false}
       androidLayerType="hardware"
+      onLoadStart={() => {
+        // A fresh page load ends any full screen the previous page was in (iOS).
+        if (Platform.OS !== 'ios') return;
+        setWebFullscreen(false);
+        IcareOfflineDrm.setFullscreenLandscape(false);
+      }}
       injectedJavaScriptBeforeContentLoaded={Platform.OS === 'ios' ? INJECTED_JS + IOS_FULLSCREEN_JS + IOS_WEB_FULLSCREEN_POLYFILL : INJECTED_JS}
       onShouldStartLoadWithRequest={onShouldStartLoadWithRequest}
       onMessage={onMessage}
