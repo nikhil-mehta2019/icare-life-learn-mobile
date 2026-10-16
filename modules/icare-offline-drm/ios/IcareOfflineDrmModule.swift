@@ -104,7 +104,7 @@ public class IcareOfflineDrmModule: Module {
         scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
         if active {
           scene.requestGeometryUpdate(.iOS(interfaceOrientations: .landscape)) { _ in }
-        } else if !IcareOrientationState.landscapeAllowed {
+        } else {
           scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait)) { _ in }
         }
       }

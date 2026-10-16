@@ -51,6 +51,7 @@ import IcareOfflineDrm, {
   type DownloadInfo,
   type OfflinePlaybackSource,
 } from '../../modules/icare-offline-drm';
+import { IosPlayerControls } from '../../components/IosPlayerControls';
 import { useNetworkStatus } from '../../hooks/useNetworkStatus';
 import {
   PLAYBACK_RATES,
@@ -200,6 +201,15 @@ function VideoPlayer({
   const [sheet, setSheet] = useState<SheetPanel>('closed');
   const picked = useRef({ audio: false, caption: false });
 
+  // ── iOS custom transport controls (the system controls list every stream track) ──
+  const [userPaused, setUserPaused] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [controlsVisible, setControlsVisible] = useState(true);
+  const [interaction, setInteraction] = useState(0);
+  const currentTimeRef = useRef(0);
+  const fillRef = useRef(false);
+
   useEffect(() => {
     if (!isIOS) return;
     IcareOfflineDrm.getPreferredLanguages()
@@ -249,6 +259,7 @@ function VideoPlayer({
       activateKeepAwakeAsync(KEEP_AWAKE_TAG);
       durationRef.current = data?.duration ?? -1;
       if (isIOS) {
+        setDuration(data?.duration ?? 0);
         setRawAudio(Array.isArray(data?.audioTracks) ? data.audioTracks : []);
         setRawText(Array.isArray(data?.textTracks) ? data.textTracks : []);
       }
@@ -279,6 +290,10 @@ function VideoPlayer({
   const handleProgress = useCallback(
     (data: { currentTime: number; playableDuration: number; seekableDuration: number }) => {
       const pos = data.currentTime;
+      if (isIOS) {
+        currentTimeRef.current = pos;
+        setCurrentTime(pos);
+      }
       // Save every 10 seconds to avoid excessive I/O
       if (pos - lastSavedPosition.current < 10) return;
       lastSavedPosition.current = pos;
@@ -292,11 +307,12 @@ function VideoPlayer({
         lastWatchedAt: new Date().toISOString(),
       }).catch(() => {});
     },
-    [chapterId],
+    [chapterId, isIOS],
   );
 
   const handleEnd = useCallback(() => {
     console.log('[player] Playback ended');
+    if (isIOS) { setUserPaused(true); setControlsVisible(true); }
     // Mark as fully watched
     const dur = durationRef.current;
     if (dur > 0) {
@@ -308,7 +324,37 @@ function VideoPlayer({
         lastWatchedAt: new Date().toISOString(),
       }).catch(() => {});
     }
-  }, [chapterId]);
+  }, [chapterId, isIOS]);
+
+  // Controls: auto-hide after a few seconds of playback.
+  const bump = useCallback(() => { setControlsVisible(true); setInteraction((n) => n + 1); }, []);
+  useEffect(() => {
+    if (!isIOS || !controlsVisible || userPaused || sheet !== 'closed') return;
+    const t = setTimeout(() => setControlsVisible(false), 3500);
+    return () => clearTimeout(t);
+  }, [isIOS, controlsVisible, userPaused, sheet, interaction]);
+
+  const togglePlay = useCallback(() => {
+    if (duration > 0 && currentTimeRef.current >= duration - 0.5) {
+      videoRef.current?.seek(0);
+      currentTimeRef.current = 0;
+      setCurrentTime(0);
+    }
+    setUserPaused((p) => !p);
+  }, [duration]);
+  const seekTo = useCallback((t: number) => {
+    const clamped = Math.max(0, Math.min(duration || t, t));
+    videoRef.current?.seek(clamped);
+    currentTimeRef.current = clamped;
+    setCurrentTime(clamped);
+  }, [duration]);
+  const skip = useCallback((delta: number) => seekTo(currentTimeRef.current + delta), [seekTo]);
+
+  // Full screen = landscape, filling the window, with these same controls (no system player).
+  const setFullscreen = useCallback((on: boolean) => {
+    setIsFullscreen(on);
+    IcareOfflineDrm.setFullscreenLandscape(on);
+  }, []);
 
   const pinchGesture = Gesture.Pinch()
     .runOnJS(true)
@@ -317,6 +363,11 @@ function VideoPlayer({
     .onEnd(() => {
       const peak = peakScale.current;
       peakScale.current = 1;
+      if (isIOS) {
+        if (peak > 1.1 && !fillRef.current) setFullscreen(true);
+        else if (peak < 0.9 && fillRef.current) setFullscreen(false);
+        return;
+      }
       if (peak > 1.1 && !isFullscreen) {
         setIsFullscreen(true);
         videoRef.current?.presentFullscreenPlayer();
@@ -328,7 +379,9 @@ function VideoPlayer({
 
   // Portrait: 16:9 player with a little air at the top (below the status bar).
   // Landscape (iOS): the player fills the screen.
-  const playerHeight = isLandscape ? height : (width / 16) * 9;
+  const fill = isIOS && (isLandscape || isFullscreen);
+  fillRef.current = fill;
+  const playerHeight = fill ? height : (width / 16) * 9;
 
   const playerView = (
       <View style={[styles.playerWrap, { width, height: playerHeight }]}>
@@ -336,10 +389,10 @@ function VideoPlayer({
           ref={videoRef}
           source={source}
           drm={drm as any}
-          paused={!isFocused}
-          controls
+          paused={!isFocused || (isIOS && userPaused)}
+          controls={!isIOS}
           resizeMode="contain"
-          progressUpdateInterval={1000}
+          progressUpdateInterval={isIOS ? 250 : 1000}
           {...(isIOS
             ? {
                 selectedAudioTrack: selectedAudioTrack as any,
@@ -375,26 +428,30 @@ function VideoPlayer({
           </GestureDetector>
         )}
         {isIOS && (
-          <View style={styles.optionButtons} pointerEvents="box-none">
+          <>
             <Pressable
-              accessibilityLabel="Full screen"
-              hitSlop={8}
-              style={styles.optionBtn}
-              onPress={() => {
-                setIsFullscreen(true);
-                IcareOfflineDrm.setFullscreenLandscape(true);
-                videoRef.current?.presentFullscreenPlayer();
-              }}>
-              <Ionicons name="expand-outline" size={20} color="#fff" />
-            </Pressable>
-            <Pressable
-              accessibilityLabel="Playback settings"
-              hitSlop={8}
-              style={styles.optionBtn}
-              onPress={() => setSheet('root')}>
-              <Ionicons name="settings-outline" size={20} color="#fff" />
-            </Pressable>
-          </View>
+              style={StyleSheet.absoluteFill}
+              accessibilityLabel="Toggle player controls"
+              onPress={() => (controlsVisible ? setControlsVisible(false) : bump())}
+            />
+            {controlsVisible && (
+              <IosPlayerControls
+                title={fill ? chapter?.title : undefined}
+                playing={!userPaused}
+                currentTime={currentTime}
+                duration={duration}
+                isFullscreen={fill}
+                insetLeft={fill ? insets.left : 0}
+                insetRight={fill ? insets.right : 0}
+                onTogglePlay={togglePlay}
+                onSkip={skip}
+                onSeek={seekTo}
+                onToggleFullscreen={() => setFullscreen(!fillRef.current)}
+                onOpenSettings={() => setSheet('root')}
+                onInteract={bump}
+              />
+            )}
+          </>
         )}
         {audioToastVisible && (
           <Animated.View style={[styles.audioToast, { opacity: audioToastOpacity }]}>
@@ -413,7 +470,7 @@ function VideoPlayer({
     <GestureHandlerRootView
       style={[
         styles.container,
-        isIOS && !isLandscape ? { paddingTop: insets.top + 20 } : null,
+        isIOS && !fill ? { paddingTop: insets.top + 20 } : null,
       ]}>
       {isIOS ? (
         <GestureDetector gesture={pinchGesture}>{playerView}</GestureDetector>
@@ -421,7 +478,7 @@ function VideoPlayer({
         playerView
       )}
 
-      {!isLandscape && (
+      {!fill && (
         <>
           {/* Offline banner */}
           {mode === 'offline' && (

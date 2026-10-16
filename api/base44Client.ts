@@ -23,6 +23,8 @@ export interface Course {
   category?: string;
   language?: 'english' | 'hindi' | 'tamil' | 'telugu' | 'kannada' | 'malayalam' | 'other';
   audienceType?: 'agency_only' | 'public_catalog';
+  /** 'india' (domestic) or 'international'. Different courses can share one title. */
+  catalogMarket?: string;
   agencyId?: string;
   status?: 'draft' | 'published' | 'archived';
   sortOrder?: number;
