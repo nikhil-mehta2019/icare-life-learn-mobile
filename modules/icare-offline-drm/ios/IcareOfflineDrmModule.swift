@@ -84,6 +84,18 @@ public class IcareOfflineDrmModule: Module {
       return OfflineDownloadManager.shared.storageStats()
     }.runOnQueue(.main)
 
+    // Lets the offline player rotate to landscape (video full screen). The app stays
+    // portrait everywhere else; see IcareOrientationSubscriber.
+    AsyncFunction("setLandscapeAllowed") { (allowed: Bool) in
+      IcareOrientationState.landscapeAllowed = allowed
+      if let scene = UIApplication.shared.connectedScenes.first(where: { $0 is UIWindowScene }) as? UIWindowScene {
+        scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+        if !allowed {
+          scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait)) { _ in }
+        }
+      }
+    }.runOnQueue(.main)
+
     // Non-DRM downloads carry no license; nothing to renew. Kept for API parity.
     AsyncFunction("renewOfflineLicense") { (_: String, _: String, _: String) in }
   }
@@ -860,5 +872,23 @@ enum FairPlayDiag {
     guard let text = identifier as? String else { return String(describing: identifier) }
     if let url = URL(string: text), let host = url.host { return "\(url.scheme ?? "?")://\(host.prefix(12))…" }
     return "\(text.prefix(24))…"
+  }
+}
+
+// MARK: - Orientation (portrait app; landscape only for video)
+
+enum IcareOrientationState {
+  /// Only touched on the main queue.
+  static var landscapeAllowed = false
+}
+
+/// Keeps the app portrait-only (as before) unless the offline player asks for landscape.
+/// Expo uses the intersection of all subscriber masks instead of the Info.plist value.
+public class IcareOrientationSubscriber: ExpoAppDelegateSubscriber {
+  public func application(
+    _ application: UIApplication,
+    supportedInterfaceOrientationsFor window: UIWindow?
+  ) -> UIInterfaceOrientationMask {
+    return IcareOrientationState.landscapeAllowed ? [.portrait, .landscapeLeft, .landscapeRight] : .portrait
   }
 }

@@ -228,6 +228,13 @@ export const IcareOfflineDrm = {
     return NativeLanguagePreferences.getPreferredLanguages();
   },
 
+  /** iOS only: allow (true) or forbid (false) landscape rotation. The app is portrait-only
+   *  otherwise; the offline player allows landscape for full screen. No-op elsewhere. */
+  async setLandscapeAllowed(allowed: boolean): Promise<void> {
+    if (Platform.OS !== 'ios') return;
+    try { await NativeModule.setLandscapeAllowed(allowed); } catch { /* older binary */ }
+  },
+
   async launchOfflinePlayer(id: string): Promise<void> {
     ensureAndroidOnly('launchOfflinePlayer');
 

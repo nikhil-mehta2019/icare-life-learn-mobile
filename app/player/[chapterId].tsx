@@ -25,6 +25,7 @@ import {
   ActivityIndicator,
   Alert,
   Animated,
+  Modal,
   Platform,
   Pressable,
   StyleSheet,
@@ -32,6 +33,8 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import Video, { type DRMType, type ReactVideoSource, type VideoRef } from 'react-native-video';
 import {
@@ -49,6 +52,13 @@ import IcareOfflineDrm, {
   type OfflinePlaybackSource,
 } from '../../modules/icare-offline-drm';
 import { useNetworkStatus } from '../../hooks/useNetworkStatus';
+import {
+  PLAYBACK_RATES,
+  buildChoices,
+  rateLabel,
+  type RawTrack,
+  type TrackChoice,
+} from '../../utils/playerTracks';
 import {
   saveProgress,
   getProgress,
@@ -173,9 +183,61 @@ function VideoPlayer({
   onRenewLicense,
 }: VideoPlayerProps) {
   const videoRef = useRef<VideoRef>(null);
-  const { width } = useWindowDimensions();
+  const { width, height } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const isIOS = Platform.OS === 'ios';
+  const isLandscape = isIOS && width > height;
   const [isFullscreen, setIsFullscreen] = useState(false);
   const peakScale = useRef(1);
+
+  // ── iOS player options (audio / subtitles / speed), same rules as Android's offline player ──
+  const [rawAudio, setRawAudio] = useState<RawTrack[]>([]);
+  const [rawText, setRawText] = useState<RawTrack[]>([]);
+  const [preferred, setPreferred] = useState<string[] | null>(null); // null = not loaded yet
+  const [audioKey, setAudioKey] = useState<string | null>(null);
+  const [captionKey, setCaptionKey] = useState<string | null>(null); // null = subtitles off
+  const [rate, setRate] = useState(1);
+  const [sheet, setSheet] = useState<SheetPanel>('closed');
+  const picked = useRef({ audio: false, caption: false });
+
+  useEffect(() => {
+    if (!isIOS) return;
+    IcareOfflineDrm.getPreferredLanguages()
+      .then((l) => setPreferred(Array.isArray(l) ? l : []))
+      .catch(() => setPreferred([]));
+  }, [isIOS]);
+
+  // The app is portrait-only; allow landscape while this player is on screen.
+  useEffect(() => {
+    if (!isIOS) return;
+    IcareOfflineDrm.setLandscapeAllowed(true).catch(() => {});
+    return () => { IcareOfflineDrm.setLandscapeAllowed(false).catch(() => {}); };
+  }, [isIOS]);
+
+  const audioChoices = useMemo<TrackChoice[]>(
+    () => (preferred === null ? [] : buildChoices(rawAudio, preferred)),
+    [rawAudio, preferred],
+  );
+  const captionChoices = useMemo<TrackChoice[]>(
+    () => (preferred === null ? [] : buildChoices(rawText, preferred)),
+    [rawText, preferred],
+  );
+
+  // Defaults: first preferred audio; first preferred subtitle, else subtitles off.
+  useEffect(() => {
+    if (!isIOS) return;
+    if (!picked.current.audio) setAudioKey(audioChoices[0]?.key ?? null);
+    if (!picked.current.caption) setCaptionKey(captionChoices[0]?.key ?? null);
+  }, [isIOS, audioChoices, captionChoices]);
+
+  const selectedAudioTrack = useMemo(() => {
+    const hit = audioChoices.find((c) => c.key === audioKey);
+    return hit ? ({ type: 'index', value: hit.index } as const) : undefined;
+  }, [audioChoices, audioKey]);
+  const selectedTextTrack = useMemo(() => {
+    const hit = captionChoices.find((c) => c.key === captionKey);
+    return hit ? ({ type: 'index', value: hit.index } as const) : ({ type: 'disabled' } as const);
+  }, [captionChoices, captionKey]);
   const [audioToastVisible, setAudioToastVisible] = useState(false);
   const audioToastOpacity = useRef(new Animated.Value(0)).current;
   const durationRef = useRef(-1);
@@ -186,6 +248,10 @@ function VideoPlayer({
     async (data: any) => {
       activateKeepAwakeAsync(KEEP_AWAKE_TAG);
       durationRef.current = data?.duration ?? -1;
+      if (isIOS) {
+        setRawAudio(Array.isArray(data?.audioTracks) ? data.audioTracks : []);
+        setRawText(Array.isArray(data?.textTracks) ? data.textTracks : []);
+      }
 
       // Seek to last-watched position (only once per mount)
       if (!hasSeekedToResume.current && initialPositionSeconds > 5) {
@@ -207,7 +273,7 @@ function VideoPlayer({
         Animated.timing(audioToastOpacity, { toValue: 0, duration: 400, useNativeDriver: true }),
       ]).start(() => setAudioToastVisible(false));
     },
-    [audioToastOpacity, initialPositionSeconds],
+    [audioToastOpacity, initialPositionSeconds, isIOS],
   );
 
   const handleProgress = useCallback(
@@ -260,10 +326,11 @@ function VideoPlayer({
       }
     });
 
-  const playerHeight = (width / 16) * 9;
+  // Portrait: 16:9 player with a little air at the top (below the status bar).
+  // Landscape (iOS): the player fills the screen.
+  const playerHeight = isLandscape ? height : (width / 16) * 9;
 
-  return (
-    <GestureHandlerRootView style={styles.container}>
+  const playerView = (
       <View style={[styles.playerWrap, { width, height: playerHeight }]}>
         <Video
           ref={videoRef}
@@ -273,6 +340,13 @@ function VideoPlayer({
           controls
           resizeMode="contain"
           progressUpdateInterval={1000}
+          {...(isIOS
+            ? {
+                selectedAudioTrack: selectedAudioTrack as any,
+                selectedTextTrack: selectedTextTrack as any,
+                rate,
+              }
+            : {})}
           onLoad={handleVideoLoad}
           onProgress={handleProgress}
           onEnd={handleEnd}
@@ -291,9 +365,32 @@ function VideoPlayer({
             Alert.alert('Playback error', detail);
           }}
         />
-        <GestureDetector gesture={pinchGesture}>
-          <View style={[StyleSheet.absoluteFill, styles.pinchOverlay]} pointerEvents="box-none" />
-        </GestureDetector>
+        {!isIOS && (
+          <GestureDetector gesture={pinchGesture}>
+            <View style={[StyleSheet.absoluteFill, styles.pinchOverlay]} pointerEvents="box-none" />
+          </GestureDetector>
+        )}
+        {isIOS && (
+          <View style={styles.optionButtons} pointerEvents="box-none">
+            <Pressable
+              accessibilityLabel="Full screen"
+              hitSlop={8}
+              style={styles.optionBtn}
+              onPress={() => {
+                setIsFullscreen(true);
+                videoRef.current?.presentFullscreenPlayer();
+              }}>
+              <Ionicons name="expand-outline" size={20} color="#fff" />
+            </Pressable>
+            <Pressable
+              accessibilityLabel="Playback settings"
+              hitSlop={8}
+              style={styles.optionBtn}
+              onPress={() => setSheet('root')}>
+              <Ionicons name="settings-outline" size={20} color="#fff" />
+            </Pressable>
+          </View>
+        )}
         {audioToastVisible && (
           <Animated.View style={[styles.audioToast, { opacity: audioToastOpacity }]}>
             <Text style={styles.audioToastText}>
@@ -305,31 +402,182 @@ function VideoPlayer({
           </Animated.View>
         )}
       </View>
+  );
 
-      {/* Offline banner */}
-      {mode === 'offline' && (
-        <OfflineBanner message="Playing downloaded content" />
+  return (
+    <GestureHandlerRootView
+      style={[
+        styles.container,
+        isIOS && !isLandscape ? { paddingTop: insets.top + 20 } : null,
+      ]}>
+      {isIOS ? (
+        <GestureDetector gesture={pinchGesture}>{playerView}</GestureDetector>
+      ) : (
+        playerView
       )}
 
-      <View style={styles.metaRow}>
-        <Text style={styles.title} numberOfLines={2}>{chapter?.title ?? 'Lesson'}</Text>
-        <Text style={styles.badge}>{mode === 'offline' ? 'Offline' : 'Streaming'}</Text>
-      </View>
+      {!isLandscape && (
+        <>
+          {/* Offline banner */}
+          {mode === 'offline' && (
+            <OfflineBanner message="Playing downloaded content" />
+          )}
 
-      {selectMuxPlaybackId(chapter ?? {} as Chapter) || download ? (
-        <DownloadControls
-          download={download}
-          offline={!!offline}
-          offlineDownload={download}
-          isDownloadPending={isDownloadPending}
-          onDelete={onDelete}
-          onGoToDownloads={onGoToDownloads}
-          onRenewLicense={onRenewLicense}
+          <View style={styles.metaRow}>
+            <Text style={styles.title} numberOfLines={2}>{chapter?.title ?? 'Lesson'}</Text>
+            <Text style={styles.badge}>{mode === 'offline' ? 'Offline' : 'Streaming'}</Text>
+          </View>
+
+          {selectMuxPlaybackId(chapter ?? {} as Chapter) || download ? (
+            <DownloadControls
+              download={download}
+              offline={!!offline}
+              offlineDownload={download}
+              isDownloadPending={isDownloadPending}
+              onDelete={onDelete}
+              onGoToDownloads={onGoToDownloads}
+              onRenewLicense={onRenewLicense}
+            />
+          ) : null}
+        </>
+      )}
+
+      {isIOS && (
+        <PlayerOptionsSheet
+          panel={sheet}
+          onPanel={setSheet}
+          audioChoices={audioChoices}
+          captionChoices={captionChoices}
+          audioKey={audioKey}
+          captionKey={captionKey}
+          rate={rate}
+          onAudio={(key) => { picked.current.audio = true; setAudioKey(key); }}
+          onCaption={(key) => { picked.current.caption = true; setCaptionKey(key); }}
+          onRate={setRate}
         />
-      ) : null}
+      )}
     </GestureHandlerRootView>
   );
 }
+
+// ─── iOS player options sheet (Audio / Subtitles / Playback speed) ───────────
+
+type SheetPanel = 'closed' | 'root' | 'audio' | 'subs' | 'speed';
+
+interface PlayerOptionsSheetProps {
+  panel: SheetPanel;
+  onPanel: (p: SheetPanel) => void;
+  audioChoices: TrackChoice[];
+  captionChoices: TrackChoice[];
+  audioKey: string | null;
+  captionKey: string | null;
+  rate: number;
+  onAudio: (key: string) => void;
+  onCaption: (key: string | null) => void;
+  onRate: (r: number) => void;
+}
+
+function PlayerOptionsSheet({
+  panel, onPanel, audioChoices, captionChoices, audioKey, captionKey, rate, onAudio, onCaption, onRate,
+}: PlayerOptionsSheetProps) {
+  const audioLabel = audioChoices.find((c) => c.key === audioKey)?.label ?? 'Default';
+  const captionLabel = captionChoices.find((c) => c.key === captionKey)?.label ?? 'Off';
+
+  const row = (label: string, value: string | null, selected: boolean, onPress: () => void) => (
+    <Pressable key={label} style={sheetStyles.row} onPress={onPress}>
+      <Text style={sheetStyles.rowLabel}>{label}</Text>
+      {value ? <Text style={sheetStyles.rowValue}>{value}</Text> : null}
+      {selected ? <Ionicons name="checkmark" size={18} color="#4FC3F7" /> : null}
+    </Pressable>
+  );
+
+  let title = 'Playback settings';
+  let body: React.ReactNode = null;
+  if (panel === 'root') {
+    body = (
+      <>
+        {audioChoices.length > 0 && row('Audio', audioLabel, false, () => onPanel('audio'))}
+        {captionChoices.length > 0 && row('Subtitles', captionLabel, false, () => onPanel('subs'))}
+        {row('Playback speed', rateLabel(rate), false, () => onPanel('speed'))}
+      </>
+    );
+  } else if (panel === 'audio') {
+    title = 'Audio track';
+    body = audioChoices.map((c) =>
+      row(c.label, null, c.key === audioKey, () => { onAudio(c.key); onPanel('closed'); }),
+    );
+  } else if (panel === 'subs') {
+    title = 'Subtitles (CC)';
+    body = (
+      <>
+        {row('Off', null, captionKey === null, () => { onCaption(null); onPanel('closed'); })}
+        {captionChoices.map((c) =>
+          row(c.label, null, c.key === captionKey, () => { onCaption(c.key); onPanel('closed'); }),
+        )}
+      </>
+    );
+  } else if (panel === 'speed') {
+    title = 'Playback speed';
+    body = PLAYBACK_RATES.map((r) =>
+      row(rateLabel(r), null, r === rate, () => { onRate(r); onPanel('closed'); }),
+    );
+  }
+
+  return (
+    <Modal
+      visible={panel !== 'closed'}
+      transparent
+      animationType="fade"
+      supportedOrientations={['portrait', 'landscape']}
+      onRequestClose={() => onPanel('closed')}>
+      <Pressable style={sheetStyles.backdrop} onPress={() => onPanel('closed')}>
+        <Pressable style={sheetStyles.sheet} onPress={() => {}}>
+          <View style={sheetStyles.header}>
+            {panel !== 'root' && panel !== 'closed' ? (
+              <Pressable hitSlop={10} onPress={() => onPanel('root')}>
+                <Ionicons name="chevron-back" size={20} color="#fff" />
+              </Pressable>
+            ) : <View style={{ width: 20 }} />}
+            <Text style={sheetStyles.title}>{title}</Text>
+            <Pressable hitSlop={10} onPress={() => onPanel('closed')}>
+              <Ionicons name="close" size={20} color="#fff" />
+            </Pressable>
+          </View>
+          {body}
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+const sheetStyles = StyleSheet.create({
+  backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.55)', justifyContent: 'flex-end' },
+  sheet: {
+    backgroundColor: '#1C2B35',
+    borderTopLeftRadius: 18,
+    borderTopRightRadius: 18,
+    paddingBottom: 28,
+    paddingHorizontal: 16,
+    maxHeight: '80%',
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 14,
+  },
+  title: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 14,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(255,255,255,0.12)',
+  },
+  rowLabel: { color: '#fff', fontSize: 15, flex: 1 },
+  rowValue: { color: 'rgba(255,255,255,0.6)', fontSize: 14 },
+});
 
 // ─── ChapterPlayerScreen (shell / parent) ─────────────────────────────────────
 //
@@ -820,6 +1068,21 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
   playerWrap: { backgroundColor: '#000', position: 'relative' },
   pinchOverlay: { backgroundColor: 'transparent' },
+  optionButtons: {
+    position: 'absolute',
+    right: 10,
+    bottom: 58,
+    flexDirection: 'row',
+    gap: 8,
+  },
+  optionBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 16, gap: 8 },
   metaRow: { flexDirection: 'row', alignItems: 'center', padding: 12, gap: 12 },
   title: { color: '#fff', fontSize: 16, fontWeight: '600', flex: 1 },
