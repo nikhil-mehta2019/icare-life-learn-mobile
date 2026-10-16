@@ -351,12 +351,16 @@ function VideoPlayer({
           onProgress={handleProgress}
           onEnd={handleEnd}
           onReadyForDisplay={() => activateKeepAwakeAsync(KEEP_AWAKE_TAG)}
-          onFullscreenPlayerWillPresent={() => activateKeepAwakeAsync(KEEP_AWAKE_TAG)}
+          onFullscreenPlayerWillPresent={() => {
+            activateKeepAwakeAsync(KEEP_AWAKE_TAG);
+            if (isIOS) IcareOfflineDrm.setFullscreenLandscape(true);
+          }}
           onFullscreenPlayerDidPresent={() => activateKeepAwakeAsync(KEEP_AWAKE_TAG)}
           onFullscreenPlayerWillDismiss={() => activateKeepAwakeAsync(KEEP_AWAKE_TAG)}
           onFullscreenPlayerDidDismiss={() => {
             setIsFullscreen(false);
             activateKeepAwakeAsync(KEEP_AWAKE_TAG);
+            if (isIOS) IcareOfflineDrm.setFullscreenLandscape(false);
           }}
           style={StyleSheet.absoluteFill}
           onError={(e: any) => {
@@ -378,6 +382,7 @@ function VideoPlayer({
               style={styles.optionBtn}
               onPress={() => {
                 setIsFullscreen(true);
+                IcareOfflineDrm.setFullscreenLandscape(true);
                 videoRef.current?.presentFullscreenPlayer();
               }}>
               <Ionicons name="expand-outline" size={20} color="#fff" />

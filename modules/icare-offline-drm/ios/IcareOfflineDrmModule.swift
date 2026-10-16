@@ -96,6 +96,20 @@ public class IcareOfflineDrmModule: Module {
       }
     }.runOnQueue(.main)
 
+    // A video entered / left full screen (online WebView player or offline player):
+    // rotate to landscape while it is full screen, back to portrait afterwards.
+    AsyncFunction("setFullscreenLandscape") { (active: Bool) in
+      IcareOrientationState.fullscreenActive = active
+      if let scene = UIApplication.shared.connectedScenes.first(where: { $0 is UIWindowScene }) as? UIWindowScene {
+        scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+        if active {
+          scene.requestGeometryUpdate(.iOS(interfaceOrientations: .landscape)) { _ in }
+        } else if !IcareOrientationState.landscapeAllowed {
+          scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait)) { _ in }
+        }
+      }
+    }.runOnQueue(.main)
+
     // Non-DRM downloads carry no license; nothing to renew. Kept for API parity.
     AsyncFunction("renewOfflineLicense") { (_: String, _: String, _: String) in }
   }
@@ -299,13 +313,15 @@ final class OfflineDownloadManager: NSObject, AVAssetDownloadDelegate {
 
     let config = AVAssetDownloadConfiguration(asset: asset, title: params.title ?? "Lesson")
 
-    // Honour the learner's audio/caption language choice when the stream offers it.
-    if let selection = await mediaSelection(
+    // Download one audio and one subtitle rendition per preferred language the stream offers.
+    let selections = await mediaSelections(
       for: asset,
+      id: id,
       audio: params.audioLanguages ?? [],
       captions: params.captionLanguages ?? []
-    ) {
-      config.primaryContentConfiguration.mediaSelections = [selection]
+    )
+    if !selections.isEmpty {
+      config.primaryContentConfiguration.mediaSelections = selections
     }
 
     let task = session.makeAssetDownloadTask(downloadConfiguration: config)
@@ -487,45 +503,66 @@ final class OfflineDownloadManager: NSObject, AVAssetDownloadDelegate {
 
   // MARK: Language selection
 
-  private func mediaSelection(
-    for asset: AVURLAsset, audio: [String], captions: [String]
-  ) async -> AVMediaSelection? {
-    guard !audio.isEmpty || !captions.isEmpty else { return nil }
-    var changed = false
+  private func mediaSelections(
+    for asset: AVURLAsset, id: String, audio: [String], captions: [String]
+  ) async -> [AVMediaSelection] {
+    FairPlayDiag.log(id, "languages requested: audio=\(audio) captions=\(captions)")
+    guard !audio.isEmpty || !captions.isEmpty else { return [] }
     do {
       let preferred = try await asset.load(.preferredMediaSelection)
-      guard let mutable = preferred.mutableCopy() as? AVMutableMediaSelection else { return nil }
-      if !audio.isEmpty,
-         let group = try await asset.loadMediaSelectionGroup(for: .audible),
-         let option = bestOption(in: group, languages: audio) {
-        mutable.select(option, in: group)
-        changed = true
+      let audioGroup = try await asset.loadMediaSelectionGroup(for: .audible)
+      let captionGroup = try await asset.loadMediaSelectionGroup(for: .legible)
+
+      func tags(_ options: [AVMediaSelectionOption]) -> String {
+        return options.map { $0.locale?.identifier ?? $0.displayName }.joined(separator: ",")
       }
-      if !captions.isEmpty,
-         let group = try await asset.loadMediaSelectionGroup(for: .legible),
-         let option = bestOption(in: group, languages: captions) {
-        mutable.select(option, in: group)
-        changed = true
+      FairPlayDiag.log(id, "stream offers audio=[\(tags(audioGroup?.options ?? []))] captions=[\(tags(captionGroup?.options ?? []))]")
+
+      let audioOptions = options(in: audioGroup, languages: audio)
+      let captionOptions = options(in: captionGroup, languages: captions)
+      FairPlayDiag.log(id, "matched audio=[\(tags(audioOptions))] captions=[\(tags(captionOptions))]")
+      guard !audioOptions.isEmpty || !captionOptions.isEmpty else { return [] }
+
+      func make(_ a: AVMediaSelectionOption?, _ c: AVMediaSelectionOption?) -> AVMediaSelection? {
+        guard let m = preferred.mutableCopy() as? AVMutableMediaSelection else { return nil }
+        if let a = a, let g = audioGroup { m.select(a, in: g) }
+        if let c = c, let g = captionGroup { m.select(c, in: g) }
+        return m
       }
-      return changed ? mutable : nil
+
+      // A selection holds one option per group, so request one selection per extra
+      // rendition; the union of these is what gets downloaded.
+      var out: [AVMediaSelection] = []
+      if audioOptions.isEmpty {
+        for c in captionOptions { if let s = make(nil, c) { out.append(s) } }
+      } else {
+        for a in audioOptions { if let s = make(a, captionOptions.first) { out.append(s) } }
+        for c in captionOptions.dropFirst() { if let s = make(audioOptions.first, c) { out.append(s) } }
+      }
+      FairPlayDiag.log(id, "requesting \(out.count) media selections")
+      return out
     } catch {
-      return nil
+      FairPlayDiag.log(id, "language selection failed: \(error.localizedDescription)")
+      return []
     }
   }
 
-  private func bestOption(
-    in group: AVMediaSelectionGroup, languages: [String]
-  ) -> AVMediaSelectionOption? {
+  /// One option per requested language (first match, in the learner's order, no duplicates).
+  private func options(
+    in group: AVMediaSelectionGroup?, languages: [String]
+  ) -> [AVMediaSelectionOption] {
+    guard let group = group else { return [] }
+    var out: [AVMediaSelectionOption] = []
     for wanted in languages {
       let base = wanted.lowercased().replacingOccurrences(of: "_", with: "-")
         .split(separator: "-").first.map(String.init) ?? wanted.lowercased()
       if let match = group.options.first(where: {
         ($0.locale?.language.languageCode?.identifier ?? "").lowercased() == base
-      }) {
-        return match
+      }), !out.contains(match) {
+        out.append(match)
       }
     }
-    return nil
+    return out
   }
 
   // MARK: Notifications (iOS counterpart of Android's download notification)
@@ -879,7 +916,8 @@ enum FairPlayDiag {
 
 enum IcareOrientationState {
   /// Only touched on the main queue.
-  static var landscapeAllowed = false
+  static var landscapeAllowed = false   // offline player screen is open
+  static var fullscreenActive = false   // a video is in full screen (web or native)
 }
 
 /// Keeps the app portrait-only (as before) unless the offline player asks for landscape.
@@ -889,6 +927,7 @@ public class IcareOrientationSubscriber: ExpoAppDelegateSubscriber {
     _ application: UIApplication,
     supportedInterfaceOrientationsFor window: UIWindow?
   ) -> UIInterfaceOrientationMask {
-    return IcareOrientationState.landscapeAllowed ? [.portrait, .landscapeLeft, .landscapeRight] : .portrait
+    let landscape = IcareOrientationState.landscapeAllowed || IcareOrientationState.fullscreenActive
+    return landscape ? [.portrait, .landscapeLeft, .landscapeRight] : .portrait
   }
 }

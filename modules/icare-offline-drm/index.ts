@@ -235,6 +235,13 @@ export const IcareOfflineDrm = {
     try { await NativeModule.setLandscapeAllowed(allowed); } catch { /* older binary */ }
   },
 
+  /** iOS only: a video entered (true) or left (false) full screen; rotates to landscape
+   *  while active. No-op elsewhere. */
+  async setFullscreenLandscape(active: boolean): Promise<void> {
+    if (Platform.OS !== 'ios') return;
+    try { await NativeModule.setFullscreenLandscape(active); } catch { /* older binary */ }
+  },
+
   async launchOfflinePlayer(id: string): Promise<void> {
     ensureAndroidOnly('launchOfflinePlayer');
 
