@@ -54,6 +54,7 @@ import type { ShouldStartLoadRequest } from 'react-native-webview/lib/WebViewTyp
 import { deliverPlayerData, deliverPlayerError } from '../../api/playerCache';
 import { API_KEY, BASE_URL } from '../../api/base44Client';
 import IcareOfflineDrm from '../../modules/icare-offline-drm';
+import { IOS_WEB_FULLSCREEN_POLYFILL } from '../../utils/webFullscreenPolyfill';
 
 const BASE44_URL = 'https://icare-life-learn.base44.app';
 
@@ -854,7 +855,7 @@ export default function ExploreScreen() {
       allowsFullscreenVideo
       mediaPlaybackRequiresUserAction={false}
       androidLayerType="hardware"
-      injectedJavaScriptBeforeContentLoaded={Platform.OS === 'ios' ? INJECTED_JS + IOS_FULLSCREEN_JS : INJECTED_JS}
+      injectedJavaScriptBeforeContentLoaded={Platform.OS === 'ios' ? INJECTED_JS + IOS_FULLSCREEN_JS + IOS_WEB_FULLSCREEN_POLYFILL : INJECTED_JS}
       onShouldStartLoadWithRequest={onShouldStartLoadWithRequest}
       onMessage={onMessage}
     />
