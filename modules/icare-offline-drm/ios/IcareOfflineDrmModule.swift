@@ -278,7 +278,11 @@ final class OfflineDownloadManager: NSObject, AVAssetDownloadDelegate {
       let keySession = AVContentKeySession(keySystem: .fairPlayStreaming)
       keySession.setDelegate(delegate, queue: DispatchQueue.main)
       keySession.addContentKeyRecipient(asset)
+      // Without this AVFoundation never requests the key during an offline download,
+      // so no persistable key is stored (observed on device: video complete, key missing).
+      asset.resourceLoader.preloadsEligibleContentKeys = true
       keySessions[id] = (keySession, delegate)
+      FairPlayDiag.log(id, "key session created; recipient added; preloadsEligibleContentKeys=true")
     }
 
     let config = AVAssetDownloadConfiguration(asset: asset, title: params.title ?? "Lesson")
@@ -435,6 +439,7 @@ final class OfflineDownloadManager: NSObject, AVAssetDownloadDelegate {
     guard let id = task.taskDescription, var record = stored[id] else { return }
     tasks[id] = nil
     keySessions[id] = nil
+    FairPlayDiag.log(id, "download task finished: error=\(error.map { ($0 as NSError).domain + "/" + String(($0 as NSError).code) } ?? "none") drm=\(record.drmType ?? "none") keyStored=\(FairPlayKeychain.exists(id: id))")
     if let error = error as NSError? {
       if error.domain == NSURLErrorDomain && error.code == NSURLErrorCancelled {
         // Cancelled by remove(); record is already gone or reset.
@@ -661,6 +666,7 @@ final class FairPlayDownloadKeyDelegate: NSObject, AVContentKeySessionDelegate {
 
   // Ask for a persistable key so the licence can be reused offline.
   func contentKeySession(_ session: AVContentKeySession, didProvide keyRequest: AVContentKeyRequest) {
+    FairPlayDiag.log(downloadId, "didProvide AVContentKeyRequest id=\(FairPlayDiag.describe(keyRequest.identifier))")
     do {
       try keyRequest.respondByRequestingPersistableContentKeyRequestAndReturnError()
     } catch {
@@ -671,6 +677,7 @@ final class FairPlayDownloadKeyDelegate: NSObject, AVContentKeySessionDelegate {
   func contentKeySession(
     _ session: AVContentKeySession, didProvide keyRequest: AVPersistableContentKeyRequest
   ) {
+    FairPlayDiag.log(downloadId, "didProvide AVPersistableContentKeyRequest id=\(FairPlayDiag.describe(keyRequest.identifier))")
     guard let identifier = keyRequest.identifier as? String,
           let skd = URL(string: identifier),
           let contentId = (skd.host ?? identifier).data(using: .utf8)
@@ -683,31 +690,39 @@ final class FairPlayDownloadKeyDelegate: NSObject, AVContentKeySessionDelegate {
       guard let self = self else { return }
       switch result {
       case .failure(let error):
+        FairPlayDiag.log(self.downloadId, "certificate FAILED: \(error.localizedDescription)")
         self.onFailure?("FairPlay certificate: \(error.localizedDescription)")
       case .success(let certificate):
+        FairPlayDiag.log(self.downloadId, "certificate ok (\(certificate.count) bytes)")
         keyRequest.makeStreamingContentKeyRequestData(
           forApp: certificate,
           contentIdentifier: contentId,
           options: [AVContentKeyRequestProtocolVersionsKey: [1]]
         ) { spc, error in
           guard let spc = spc, error == nil else {
+            FairPlayDiag.log(self.downloadId, "SPC FAILED: \(error?.localizedDescription ?? "unknown")")
             self.onFailure?("FairPlay SPC: \(error?.localizedDescription ?? "unknown error")")
             return
           }
+          FairPlayDiag.log(self.downloadId, "SPC built (\(spc.count) bytes); requesting licence")
           self.requestKeyResponse(spc: spc) { ckcResult in
             switch ckcResult {
             case .failure(let error):
+              FairPlayDiag.log(self.downloadId, "licence FAILED: \(error.localizedDescription)")
               self.onFailure?("FairPlay licence: \(error.localizedDescription)")
             case .success(let ckc):
+              FairPlayDiag.log(self.downloadId, "licence ok (\(ckc.count) bytes)")
               do {
                 let persistentKey = try keyRequest.persistableContentKey(
                   fromKeyVendorResponse: ckc, options: nil
                 )
                 FairPlayKeychain.save(persistentKey, id: self.downloadId)
+                FairPlayDiag.log(self.downloadId, "persistent key saved to Keychain (\(persistentKey.count) bytes)")
                 keyRequest.processContentKeyResponse(
                   AVContentKeyResponse(fairPlayStreamingKeyResponseData: persistentKey)
                 )
               } catch {
+                FairPlayDiag.log(self.downloadId, "persistable key FAILED: \(error.localizedDescription)")
                 self.onFailure?("FairPlay key: \(error.localizedDescription)")
               }
             }
@@ -721,6 +736,7 @@ final class FairPlayDownloadKeyDelegate: NSObject, AVContentKeySessionDelegate {
     _ session: AVContentKeySession, contentKeyRequest keyRequest: AVContentKeyRequest,
     didFailWithError err: Error
   ) {
+    FairPlayDiag.log(downloadId, "content key request FAILED: \(err.localizedDescription)")
     onFailure?("FairPlay: \(err.localizedDescription)")
   }
 
@@ -737,6 +753,7 @@ final class FairPlayDownloadKeyDelegate: NSObject, AVContentKeySessionDelegate {
             let data = data, !data.isEmpty
       else {
         let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+        FairPlayDiag.log(self?.downloadId ?? "?", "certificate HTTP \(code), \(data?.count ?? 0) bytes")
         return completion(.failure(OfflineDownloadError(message: "certificate request failed (HTTP \(code))")))
       }
       self?.certificate = data
@@ -757,6 +774,7 @@ final class FairPlayDownloadKeyDelegate: NSObject, AVContentKeySessionDelegate {
             let data = data, !data.isEmpty
       else {
         let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+        FairPlayDiag.log(self.downloadId, "licence HTTP \(code), \(data?.count ?? 0) bytes")
         return completion(.failure(OfflineDownloadError(message: "licence request failed (HTTP \(code))")))
       }
       completion(.success(FairPlayDownloadKeyDelegate.normalizeKeyResponse(data)))
@@ -788,5 +806,29 @@ final class FairPlayDownloadKeyDelegate: NSObject, AVContentKeySessionDelegate {
       components.queryItems = items
     }
     return components.url ?? url
+  }
+}
+
+/// Small on-device trail of FairPlay steps (no tokens or key material), kept in
+/// UserDefaults under `life.icare.offline.fairplay.diag` so it can be pulled from
+/// a device with `devicectl ... copy from` for troubleshooting.
+enum FairPlayDiag {
+  private static let key = "life.icare.offline.fairplay.diag"
+  private static let lock = NSLock()
+
+  static func log(_ id: String, _ message: String) {
+    lock.lock(); defer { lock.unlock() }
+    let stamp = ISO8601DateFormatter().string(from: Date())
+    var lines = UserDefaults.standard.stringArray(forKey: key) ?? []
+    lines.append("\(stamp) [\(id.prefix(8))] \(message)")
+    if lines.count > 200 { lines.removeFirst(lines.count - 200) }
+    UserDefaults.standard.set(lines, forKey: key)
+  }
+
+  /// Key identifiers are skd:// URIs; log scheme/host only.
+  static func describe(_ identifier: Any?) -> String {
+    guard let text = identifier as? String else { return String(describing: identifier) }
+    if let url = URL(string: text), let host = url.host { return "\(url.scheme ?? "?")://\(host.prefix(12))…" }
+    return "\(text.prefix(24))…"
   }
 }
