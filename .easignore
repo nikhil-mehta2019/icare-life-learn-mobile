@@ -18,3 +18,8 @@ modules/icare-offline-drm/android/local.properties
 # Not needed in the build archive
 screenshots/
 docs/
+
+# Secrets / local diagnostics. Mirrors the "# secrets" block in .gitignore:
+# when .easignore exists EAS uses it INSTEAD of .gitignore, so list them here too.
+icare-play-store-*.json
+drm.txt
