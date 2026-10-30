@@ -4,15 +4,35 @@
  * Bridges pre-fetched Mux tokens from the WebView auth context to the native
  * player screen.
  *
- * Flow:
- *  1. explore.tsx injected JS detects a chapter URL, fetches chapter metadata
- *     and Mux tokens using the WebView's authenticated session cookies, then
- *     posts a CHAPTER_TOKENS message to the native layer.
- *  2. explore.tsx onMessage calls deliverPlayerData() with the result.
- *  3. player/[chapterId].tsx calls waitForPlayerData() which either resolves
- *     immediately (if tokens already arrived) or waits up to TIMEOUT_MS.
- *  4. On timeout or CHAPTER_ERROR the promise resolves with null so the player
- *     can fall back to native API calls.
+ * ─── Flow ────────────────────────────────────────────────────────────────────
+ *
+ *  OPEN_CHAPTER path (primary):
+ *   1. explore.tsx injected JS detects a chapter URL via SPA navigation hook.
+ *   2. Injected JS posts OPEN_CHAPTER → native opens player in 'loading' state.
+ *   3. Injected JS posts REQUEST_TOKENS to itself (no history.back involved).
+ *   4. Injected JS fetches chapter + Mux tokens using the WebView's authenticated
+ *      session cookies (credentials: 'include'), then posts CHAPTER_TOKENS.
+ *   5. explore.tsx onMessage calls deliverPlayerData() with the result.
+ *   6. player/[chapterId].tsx calls waitForPlayerData() which resolves
+ *      immediately (tokens already cached) or waits up to TIMEOUT_MS.
+ *
+ *  REQUEST_TOKENS path (download / delete-download):
+ *   1. Player screen posts REQUEST_TOKENS message to the WebView.
+ *   2. WebView bridge fetches and posts CHAPTER_TOKENS.
+ *   3. Player resolves via the same waitForPlayerData() mechanism.
+ *
+ *  Error / timeout path:
+ *   - CHAPTER_ERROR or 10 s timeout → resolves null → player shows error.
+ *   - Player unmount calls cancelWait() → clears the pending resolver and its
+ *     timer immediately; no stale setState after unmount.
+ *
+ * ─── Safety guarantees ───────────────────────────────────────────────────────
+ *  • Stored entries expire after STORE_TTL_MS (60 s) — stale Mux tokens are
+ *    never served to a re-mounted player.
+ *  • cancelWait() removes only the caller's own resolver; unrelated waiters for
+ *    the same chapterId are unaffected.
+ *  • Multiple simultaneous waiters for the same chapterId are all resolved when
+ *    tokens arrive (though the UI should prevent this via deduplication).
  */
 
 import type { Chapter, MuxTokenResponse } from './base44Client';
@@ -22,63 +42,192 @@ export interface CachedPlayerData {
   tokens: MuxTokenResponse;
 }
 
-const TIMEOUT_MS = 10_000;
+/**
+ * Wraps the result of a bridge fetch — either data or an error reason.
+ * Using a discriminated union means we never lose the error message when
+ * the bridge posts CHAPTER_ERROR; the player can surface it directly.
+ */
+export type BridgeResult =
+  | { ok: true;  data: CachedPlayerData }
+  | { ok: false; error: string };
 
-// Tokens that arrived before the player screen mounted.
-const store: Record<string, CachedPlayerData> = {};
+/** How long to wait for the WebView to deliver tokens before resolving null.
+ *  Set to 20 s: the WebView bridge now has two sequential 8 s fetch timeouts
+ *  (Chapter + getMuxToken), so the native timeout must be longer to let the
+ *  bridge deliver a specific error rather than firing the generic timeout first. */
+const TIMEOUT_MS = 20_000;
 
-// Resolver callbacks waiting inside waitForPlayerData().
-const pending: Record<string, Array<(d: CachedPlayerData | null) => void>> = {};
+/** How long a pre-cached entry remains valid. Mux tokens are long-lived but we
+ *  refresh conservatively to avoid serving stale DRM licenses. */
+const STORE_TTL_MS = 60_000;
+
+// ─── Internal types ──────────────────────────────────────────────────────────
+
+interface StoredEntry {
+  data: CachedPlayerData;
+  expiresAt: number;
+}
+
+interface PendingResolver {
+  resolve: (d: BridgeResult) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+// ─── Module-level state ──────────────────────────────────────────────────────
+
+/** Tokens that arrived before the player screen mounted (fast network path). */
+const store: Record<string, StoredEntry> = {};
+
+/** Errors that arrived before the player mounted — carried so we don't lose them. */
+const errorStore: Record<string, string> = {};
+
+/** Resolvers waiting inside waitForPlayerData(). */
+const pending: Record<string, PendingResolver[]> = {};
+
+// ─── Exported API ─────────────────────────────────────────────────────────────
 
 /**
- * Called from the player screen.  Resolves with token data once the WebView
- * bridge delivers them, or with null if the timeout fires first.
+ * Called from the player screen on mount.
+ *
+ * Returns a resolver handle that MUST be passed to cancelWait() in the
+ * effect cleanup to prevent stale setState after unmount.
+ *
+ * Usage:
+ *   const { promise, cancel } = waitForPlayerData(chapterId);
+ *   promise.then(data => { if (!cancelled) { ... } });
+ *   return () => { cancelled = true; cancel(); };
  */
-export function waitForPlayerData(
-  chapterId: string
-): Promise<CachedPlayerData | null> {
-  // Already cached from a fast network / early delivery
-  if (chapterId in store) {
-    const d = store[chapterId];
-    delete store[chapterId];
-    return Promise.resolve(d);
+export function waitForPlayerData(chapterId: string): {
+  promise: Promise<BridgeResult>;
+  cancel: () => void;
+} {
+  // Fast path: error already arrived before this call.
+  if (chapterId in errorStore) {
+    const error = errorStore[chapterId];
+    delete errorStore[chapterId];
+    console.warn(`[playerCache] Replaying cached error for chapter ${chapterId}: ${error}`);
+    return {
+      promise: Promise.resolve({ ok: false, error } as BridgeResult),
+      cancel: () => { /* nothing to cancel */ },
+    };
   }
 
-  return new Promise((resolve) => {
-    if (!pending[chapterId]) pending[chapterId] = [];
-    pending[chapterId].push(resolve);
+  // Fast path: tokens already arrived before this call.
+  const cached = store[chapterId];
+  if (cached) {
+    if (Date.now() < cached.expiresAt) {
+      delete store[chapterId];
+      console.log(`[playerCache] Cache hit for chapter ${chapterId}`);
+      return {
+        promise: Promise.resolve({ ok: true, data: cached.data } as BridgeResult),
+        cancel: () => { /* nothing to cancel */ },
+      };
+    }
+    // Expired — discard and wait for a fresh fetch.
+    console.warn(`[playerCache] Discarding expired cache entry for chapter ${chapterId}`);
+    delete store[chapterId];
+  }
 
+  // Slow path: register a resolver and wait.
+  let resolver!: PendingResolver;
+
+  const promise = new Promise<BridgeResult>((resolve) => {
     const timer = setTimeout(() => {
-      const arr = pending[chapterId];
-      if (arr) {
-        const idx = arr.indexOf(resolve);
-        if (idx >= 0) arr.splice(idx, 1);
-        if (arr.length === 0) delete pending[chapterId];
-      }
-      resolve(null); // fall back to native fetch path
+      _removeResolver(chapterId, resolver);
+      const msg = `Timed out after ${TIMEOUT_MS / 1000}s waiting for WebView bridge tokens`;
+      console.warn(`[playerCache] ${msg} for chapter ${chapterId}`);
+      resolve({ ok: false, error: msg });
     }, TIMEOUT_MS);
 
-    // Prevent the timer from blocking Node/JS teardown in tests
-    if (typeof timer === 'object' && (timer as any).unref) {
-      (timer as any).unref();
+    // Prevent the timer from blocking Node/JS teardown in tests.
+    if (typeof timer === 'object' && (timer as NodeJS.Timeout).unref) {
+      (timer as NodeJS.Timeout).unref();
     }
+
+    resolver = { resolve, timer };
+    if (!pending[chapterId]) pending[chapterId] = [];
+    pending[chapterId].push(resolver);
+
+    console.log(`[playerCache] Waiting for tokens for chapter ${chapterId} (${pending[chapterId].length} waiter(s))`);
   });
+
+  const cancel = () => {
+    _removeResolver(chapterId, resolver);
+    console.log(`[playerCache] Wait cancelled for chapter ${chapterId}`);
+  };
+
+  return { promise, cancel };
 }
 
 /**
- * Called from explore.tsx when CHAPTER_TOKENS or CHAPTER_ERROR arrives.
- * Pass null on error so waitForPlayerData() unblocks immediately.
+ * Called from explore.tsx when CHAPTER_TOKENS arrives.
  */
 export function deliverPlayerData(
   chapterId: string,
-  data: CachedPlayerData | null
+  data: CachedPlayerData
 ): void {
-  const arr = pending[chapterId];
-  if (arr && arr.length > 0) {
-    arr.forEach((r) => r(data));
+  const result: BridgeResult = { ok: true, data };
+  const waiters = pending[chapterId];
+
+  if (waiters && waiters.length > 0) {
+    console.log(`[playerCache] Delivering tokens to ${waiters.length} waiter(s) for chapter ${chapterId}`);
+    const snapshot = [...waiters];
     delete pending[chapterId];
-  } else if (data) {
-    // Player not yet mounted — store for later pickup
-    store[chapterId] = data;
+    snapshot.forEach((w) => { clearTimeout(w.timer); w.resolve(result); });
+  } else {
+    console.log(`[playerCache] No waiters yet — caching tokens for chapter ${chapterId}`);
+    store[chapterId] = { data, expiresAt: Date.now() + STORE_TTL_MS };
   }
+}
+
+/**
+ * Called from explore.tsx when CHAPTER_ERROR arrives.
+ * Carries the error string so the player can display the exact reason.
+ */
+export function deliverPlayerError(
+  chapterId: string,
+  error: string
+): void {
+  const result: BridgeResult = { ok: false, error };
+  const waiters = pending[chapterId];
+
+  if (waiters && waiters.length > 0) {
+    console.warn(`[playerCache] Delivering error to ${waiters.length} waiter(s) for chapter ${chapterId}: ${error}`);
+    const snapshot = [...waiters];
+    delete pending[chapterId];
+    snapshot.forEach((w) => { clearTimeout(w.timer); w.resolve(result); });
+  } else {
+    // No waiter yet — store error for pickup when player mounts.
+    console.warn(`[playerCache] No waiters — storing error for chapter ${chapterId}: ${error}`);
+    errorStore[chapterId] = error;
+  }
+}
+
+/**
+ * Clears ALL state for a given chapterId (pending resolvers + cached entry).
+ * Use sparingly — prefer cancelWait() per resolver for targeted cleanup.
+ */
+export function clearChapterData(chapterId: string): void {
+  const waiters = pending[chapterId];
+  if (waiters) {
+    waiters.forEach((w) => {
+      clearTimeout(w.timer);
+      w.resolve({ ok: false, error: 'Cleared by clearChapterData()' });
+    });
+    delete pending[chapterId];
+  }
+  delete store[chapterId];
+  delete errorStore[chapterId];
+  console.log(`[playerCache] Cleared all state for chapter ${chapterId}`);
+}
+
+// ─── Internal helpers ─────────────────────────────────────────────────────────
+
+function _removeResolver(chapterId: string, resolver: PendingResolver): void {
+  clearTimeout(resolver.timer);
+  const arr = pending[chapterId];
+  if (!arr) return;
+  const idx = arr.indexOf(resolver);
+  if (idx >= 0) arr.splice(idx, 1);
+  if (arr.length === 0) delete pending[chapterId];
 }

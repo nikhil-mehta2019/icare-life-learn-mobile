@@ -1,50 +1,16 @@
-/* eslint-disable @typescript-eslint/no-var-requires */
-const { withAndroidManifest, AndroidConfig } = require('expo/config-plugins');
-
 /**
- * Expo config plugin that registers the OfflineDownloadService in the
- * AndroidManifest. Also ensures FOREGROUND_SERVICE permissions are present
- * (we declare them in app.json as well; this keeps the module self-contained
- * if it's later extracted).
+ * Expo config plugin for icare-offline-drm.
+ *
+ * The android/ directory is pre-configured — OfflineDownloadService and
+ * OfflinePlayerActivity are already registered in AndroidManifest.xml, and
+ * eas.json uses prebuildCommand: "echo 'skipping prebuild'" so expo prebuild
+ * never runs.
+ *
+ * This file exists only to satisfy the app.json plugin reference so that
+ * `expo config` resolves without error during EAS build setup.
  */
-function withIcareOfflineDrm(config) {
-  return withAndroidManifest(config, (cfg) => {
-    const manifest = cfg.modResults;
+const { createRunOncePlugin } = require('@expo/config-plugins');
 
-    const permissions = [
-      'android.permission.FOREGROUND_SERVICE',
-      'android.permission.FOREGROUND_SERVICE_DATA_SYNC',
-    ];
-    manifest.manifest['uses-permission'] = manifest.manifest['uses-permission'] || [];
-    for (const perm of permissions) {
-      const exists = manifest.manifest['uses-permission'].some(
-        (p) => p.$ && p.$['android:name'] === perm
-      );
-      if (!exists) {
-        manifest.manifest['uses-permission'].push({ $: { 'android:name': perm } });
-      }
-    }
+const withIcareOfflineDrm = (config) => config;
 
-    const application = AndroidConfig.Manifest.getMainApplicationOrThrow(manifest);
-    application.service = application.service || [];
-
-    const serviceName = 'expo.modules.icareofflinedrm.OfflineDownloadService';
-    const exists = application.service.some(
-      (s) => s.$ && s.$['android:name'] === serviceName
-    );
-
-    if (!exists) {
-      application.service.push({
-        $: {
-          'android:name': serviceName,
-          'android:exported': 'false',
-          'android:foregroundServiceType': 'dataSync',
-        },
-      });
-    }
-
-    return cfg;
-  });
-}
-
-module.exports = withIcareOfflineDrm;
+module.exports = createRunOncePlugin(withIcareOfflineDrm, 'icare-offline-drm', '0.1.0');

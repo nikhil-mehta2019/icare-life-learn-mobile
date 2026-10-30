@@ -2,15 +2,15 @@
 // move this to a runtime config fetched after auth, or use per-user signed
 // tokens served by a Base44 backend function.
 
-const BASE_URL = 'https://icare-life-learn.base44.app/api';
-const API_KEY = '6af260f41e2140b9950788621360c5cf';
+import IcareOfflineDrm from '../modules/icare-offline-drm';
+
+export const BASE_URL = 'https://icare-life-learn.base44.app/api';
+export const API_KEY = '6af260f41e2140b9950788621360c5cf';
 
 const defaultHeaders: Record<string, string> = {
   'Content-Type': 'application/json',
   'api_key': API_KEY,
 };
-
-// ─── Entity Types ──────────────────────────────────────────────────────────────
 
 export interface Course {
   id: string;
@@ -42,6 +42,7 @@ export interface Course {
   trialAllowed?: boolean;
   defaultTrialDays?: number;
   includedInOTTSubscription?: boolean;
+  validityDays?: number;
   created_date?: string;
   updated_date?: string;
 }
@@ -68,15 +69,14 @@ export interface Chapter {
   description?: string;
   contentType?: 'video' | 'ispring' | 'pdf' | 'resource';
   muxAssetId?: string;
-  // ─ Playback IDs — use selectMuxPlaybackId() to choose the right one ─
-  muxPlaybackId?: string;           // public (unsigned)
-  muxSignedPlaybackId?: string;     // signed/token-protected streams
-  muxDrmPlaybackId?: string;        // Widevine DRM streams
+  muxPlaybackId?: string;
+  muxSignedPlaybackId?: string;
+  muxDrmPlaybackId?: string;
   muxSignedPlaybackRequired?: boolean;
   muxDrmProtected?: boolean;
   videoPosterUrl?: string;
   ispringUrl?: string;
-  ispringUrlsJson?: string;         // JSON string: [{language, url}]
+  ispringUrlsJson?: string;
   slidesUrl?: string;
   resourceUrl?: string;
   textContent?: string;
@@ -96,14 +96,34 @@ export interface MuxTokenResponse {
   secureStreamUrl: string;
 }
 
+export interface MuxDownloadTokenResponse {
+  drmEnabled: boolean;
+  manifestUrl: string;
+  drmToken: string | null;
+  widevineLicenseUrl: string | null;
+  fairplayLicenseUrl: string | null;
+  fairplayCertificateUrl: string | null;
+  licenseExpiresAt?: string | null;
+  audioLanguages: string[];
+  captionLanguages: string[];
+  courseId?: string | null;
+  chapterId?: string | null;
+  courseAccessReason?: string | null;
+  courseAccessExpiresAt?: string | null;
+}
+
+export interface UserPreferences {
+  preferredLanguages: string[];
+  primaryLanguage: string | null;
+  preferredLanguage: string | null;
+}
+
 export interface StudentAccessResponse {
   hasCourseAccess: boolean;
   courseAccessReason?: string;
   courseAccessExpiresAt?: string;
   isOnTrial?: boolean;
 }
-
-// ─── Internal HTTP helpers ─────────────────────────────────────────────────────
 
 async function apiGet<T>(path: string): Promise<{ status: number; data: T }> {
   const response = await fetch(`${BASE_URL}${path}`, { headers: defaultHeaders });
@@ -129,9 +149,6 @@ async function apiPost<T>(
   return data as T;
 }
 
-// ─── Course ────────────────────────────────────────────────────────────────────
-
-/** Fetch published courses visible in the catalog. */
 export async function fetchCourses(
   filter?: object,
   limit = 50
@@ -149,8 +166,6 @@ export async function fetchCourse(
   return apiGet<Course>(`/entities/Course/${courseId}`);
 }
 
-// ─── Module ────────────────────────────────────────────────────────────────────
-
 export async function fetchModules(courseId: string): Promise<Module[]> {
   const q = encodeURIComponent(JSON.stringify({ courseId, status: 'published' }));
   const { data } = await apiGet<Module[]>(
@@ -159,7 +174,11 @@ export async function fetchModules(courseId: string): Promise<Module[]> {
   return Array.isArray(data) ? data : [];
 }
 
-// ─── Chapter ───────────────────────────────────────────────────────────────────
+export async function fetchModule(
+  moduleId: string
+): Promise<{ status: number; data: Module }> {
+  return apiGet<Module>(`/entities/Module/${moduleId}`);
+}
 
 export async function fetchChapters(moduleId: string): Promise<Chapter[]> {
   const q = encodeURIComponent(JSON.stringify({ moduleId, status: 'published' }));
@@ -175,15 +194,6 @@ export async function fetchChapter(
   return apiGet<Chapter>(`/entities/Chapter/${chapterId}`);
 }
 
-/**
- * Pick the correct Mux playback ID for token generation.
- *
- * Priority:  DRM playback ID  >  Signed playback ID  >  Public playback ID
- *
- * This matters because getMuxToken() issues different tokens based on the
- * type of playback ID passed. Passing the wrong ID will result in either
- * an unsigned stream or a failed DRM license acquisition.
- */
 export function selectMuxPlaybackId(chapter: Chapter): string | null {
   if (chapter.muxDrmProtected && chapter.muxDrmPlaybackId) {
     return chapter.muxDrmPlaybackId;
@@ -194,21 +204,165 @@ export function selectMuxPlaybackId(chapter: Chapter): string | null {
   return chapter.muxPlaybackId ?? null;
 }
 
-// ─── Backend Functions ─────────────────────────────────────────────────────────
-
-/**
- * Get Mux signed tokens for playback.
- * Always call selectMuxPlaybackId() first to pick the right playback ID.
- * Returns: { token, drmToken, drmLicenseUrl, secureStreamUrl }
- */
 export async function getMuxToken(playbackId: string): Promise<MuxTokenResponse> {
   return apiPost<MuxTokenResponse>('/functions/getMuxToken', { playbackId }, true);
 }
 
 /**
- * Resolve whether the authenticated student has access to a course.
- * Requires the student to be logged in via the WebView session cookie.
+ * Authorize an offline download through the Course App entitlement gate.
+ *
+ * The previous implementation called the iCare Play API directly with a static
+ * API key bundled in the APK. That bypassed course-expiry/agency/purchase rules.
+ * New downloads now require the learner JWT and Base44 resolves the authoritative
+ * playback → chapter → course relationship server-side before proxying to Play.
  */
+export async function getMuxDownloadToken(
+  playbackId: string,
+  jwt?: string,
+  courseId?: string,
+  platform?: string
+): Promise<MuxDownloadTokenResponse> {
+  if (!jwt) {
+    throw new Error('Your session must be refreshed before downloading. Please reconnect and try again.');
+  }
+
+  const response = await fetch(`${BASE_URL}/functions/getMuxDownloadToken`, {
+    method: 'POST',
+    headers: {
+      ...defaultHeaders,
+      Authorization: `Bearer ${jwt}`,
+    },
+    // courseId disambiguates chapters that share a playbackId across courses
+    // (e.g. the same Mux asset reused in two courses) so the server resolves
+    // access against the course the learner actually selected.
+    body: JSON.stringify({ playbackId, ...(courseId ? { courseId } : {}), ...(platform ? { platform } : {}) }),
+  });
+  const data = await response.json().catch(() => ({} as any));
+  if (!response.ok) {
+    const code = (data as any)?.error ?? `Download authorization failed (${response.status})`;
+    console.warn(
+      `[base44Client] getMuxDownloadToken denied — playbackId=${playbackId} status=${response.status} ` +
+      `code=${code} jwtLen=${jwt.length} body=${JSON.stringify(data).slice(0, 300)}`
+    );
+    if (code === 'no_course_access') {
+      throw new Error('Your access to this course has expired or is no longer active.');
+    }
+    if (code === 'agency_access_restricted') {
+      throw new Error('Your course access is currently restricted. Please contact your agency.');
+    }
+    throw new Error(code);
+  }
+
+  const d = data as any;
+  const result: MuxDownloadTokenResponse = {
+    drmEnabled: !!d.drmEnabled,
+    manifestUrl: d.manifestUrl ?? '',
+    drmToken: d.drmToken ?? '',
+    widevineLicenseUrl: d.widevineLicenseUrl ?? null,
+    fairplayLicenseUrl: d.fairplayLicenseUrl ?? null,
+    fairplayCertificateUrl: d.fairplayCertificateUrl ?? null,
+    licenseExpiresAt: d.licenseExpiresAt ?? null,
+    // The Course App authorization endpoint intentionally need not expose the
+    // upstream catalogue. The caller can pass the learner's preferred codes;
+    // native playback still filters to tracks actually present in the download.
+    audioLanguages: Array.isArray(d.audioLanguages) ? d.audioLanguages : [],
+    captionLanguages: Array.isArray(d.captionLanguages) ? d.captionLanguages : [],
+    courseId: d.courseId ?? null,
+    chapterId: d.chapterId ?? null,
+    courseAccessReason: d.courseAccessReason ?? null,
+    courseAccessExpiresAt: d.courseAccessExpiresAt ?? null,
+  };
+
+  if (result.chapterId) {
+    try {
+      await IcareOfflineDrm.setDownloadEntitlement({
+        id: result.chapterId,
+        courseId: result.courseId,
+        chapterId: result.chapterId,
+        accessExpiresAt: result.courseAccessExpiresAt,
+      });
+    } catch (error) {
+      console.warn('[base44Client] Could not persist download entitlement metadata', error);
+    }
+  }
+
+  return result;
+}
+
+function normalizePreferenceCodes(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of value) {
+    const code = String(item || '').trim().toLowerCase();
+    if (!code || seen.has(code)) continue;
+    seen.add(code);
+    out.push(code);
+    if (out.length === 3) break;
+  }
+  return out;
+}
+
+/**
+ * Get the authenticated learner's ordered three-language contract.
+ * The primary/legacy preferredLanguage remains available for old call sites.
+ * On Android the full trio is also persisted into the native module so the
+ * offline player can apply the same visibility/order/default rules without
+ * performing its own Base44 authentication.
+ */
+export async function fetchUserPreferences(jwt: string): Promise<UserPreferences> {
+  const response = await fetch(`${BASE_URL}/functions/getMyPreferences`, {
+    method: 'POST',
+    headers: { ...defaultHeaders, Authorization: `Bearer ${jwt}` },
+    body: JSON.stringify({}),
+  });
+  const data = await response.json().catch(() => ({} as any));
+  if (!response.ok) {
+    throw new Error((data as any)?.error ?? `getMyPreferences failed (${response.status})`);
+  }
+
+  const d = data as any;
+  const rawOrdered =
+    d?.preferredLanguages ?? d?.data?.preferredLanguages ?? d?.user?.preferredLanguages ?? [];
+  let preferredLanguages = normalizePreferenceCodes(rawOrdered);
+  const legacy =
+    d?.primaryLanguage ?? d?.preferredLanguage ?? d?.preferred_language ??
+    d?.data?.preferredLanguage ?? d?.user?.preferredLanguage ?? null;
+  const primaryLanguage = preferredLanguages[0] ?? (legacy ? String(legacy).toLowerCase() : null);
+  if (!preferredLanguages.length && primaryLanguage) preferredLanguages = [primaryLanguage];
+
+  try {
+    await IcareOfflineDrm.setPreferredLanguages(preferredLanguages);
+  } catch (error) {
+    console.warn('[base44Client] Could not persist native language preferences', error);
+  }
+
+  return {
+    preferredLanguages,
+    primaryLanguage,
+    preferredLanguage: primaryLanguage,
+  };
+}
+
+export async function getMuxTokenWithJwt(
+  playbackId: string,
+  jwt: string
+): Promise<MuxTokenResponse> {
+  const response = await fetch(`${BASE_URL}/functions/getMuxToken`, {
+    method: 'POST',
+    headers: {
+      ...defaultHeaders,
+      'Authorization': `Bearer ${jwt}`,
+    },
+    body: JSON.stringify({ playbackId }),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error((data as any)?.error ?? `getMuxToken failed (${response.status})`);
+  }
+  return data as MuxTokenResponse;
+}
+
 export async function resolveStudentAccess(
   courseId: string
 ): Promise<{ status: number; data: StudentAccessResponse }> {
@@ -222,9 +376,23 @@ export async function resolveStudentAccess(
   return { status: response.status, data };
 }
 
-// ─── Dev / connection test ──────────────────────────────────────────────────────
+export async function resolveStudentAccessWithJwt(
+  courseId: string,
+  jwt: string,
+  deviceSecret?: string | null,
+): Promise<{ status: number; data: StudentAccessResponse }> {
+  const response = await fetch(`${BASE_URL}/functions/resolveStudentAccess`, {
+    method: 'POST',
+    headers: {
+      ...defaultHeaders,
+      Authorization: `Bearer ${jwt}`,
+    },
+    body: JSON.stringify({ courseId, ...(deviceSecret ? { deviceSecret } : {}) }),
+  });
+  const data = await response.json();
+  return { status: response.status, data };
+}
 
-/** Used only during development to verify connectivity. */
 export async function testConnection(): Promise<{ status: number; data: unknown }> {
   return apiGet('/entities/Course?limit=1');
 }

@@ -40,3 +40,16 @@ app-example
 
 # generated native folders
 /ios
+
+# Claude Code local tooling config
+/.claude/
+
+# local logs and build metadata
+*.log
+android/cls/
+modules/icare-offline-drm/android/.gradle/
+modules/icare-offline-drm/android/build/
+
+# secrets
+icare-play-store-*.json
+drm.txt
