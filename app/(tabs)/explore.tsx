@@ -800,12 +800,16 @@ export default function ExploreScreen() {
    */
   const onShouldStartLoadWithRequest = useCallback(
     (req: ShouldStartLoadRequest) => {
-      // Allow all same-origin and relative navigation inside the WebView.
+      // Allow same-origin navigation inside the WebView.
       if (req.url.startsWith(BASE44_URL) || req.url.startsWith('about:')) {
         return true;
       }
-      // For external links, you could open the system browser here.
-      // For now, block unexpected external navigations silently.
+      // Allow Google OAuth flow (accounts.google.com) so "Sign in with Google"
+      // works — it redirects through Google's domain before returning to Base44.
+      if (req.url.startsWith('https://accounts.google.com') ||
+          req.url.startsWith('https://oauth2.googleapis.com')) {
+        return true;
+      }
       console.warn(`[explore] Blocking external navigation to: ${req.url}`);
       return false;
     },
@@ -849,6 +853,7 @@ export default function ExploreScreen() {
       injectedJavaScriptBeforeContentLoaded={INJECTED_JS}
       onShouldStartLoadWithRequest={onShouldStartLoadWithRequest}
       onMessage={onMessage}
+      userAgent="Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
     />
   );
 }
