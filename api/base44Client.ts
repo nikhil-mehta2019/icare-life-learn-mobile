@@ -378,7 +378,8 @@ export async function resolveStudentAccess(
 
 export async function resolveStudentAccessWithJwt(
   courseId: string,
-  jwt: string
+  jwt: string,
+  deviceSecret?: string | null,
 ): Promise<{ status: number; data: StudentAccessResponse }> {
   const response = await fetch(`${BASE_URL}/functions/resolveStudentAccess`, {
     method: 'POST',
@@ -386,7 +387,7 @@ export async function resolveStudentAccessWithJwt(
       ...defaultHeaders,
       Authorization: `Bearer ${jwt}`,
     },
-    body: JSON.stringify({ courseId }),
+    body: JSON.stringify({ courseId, ...(deviceSecret ? { deviceSecret } : {}) }),
   });
   const data = await response.json();
   return { status: response.status, data };

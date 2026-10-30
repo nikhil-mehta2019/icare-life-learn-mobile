@@ -581,6 +581,26 @@ const INJECTED_JS = `
     }
   })();
 
+  // Send the device secret so native can pass it to Base44 functions that
+  // require device registration verification (e.g. resolveStudentAccess).
+  (function _sendDeviceSecretToNative() {
+    var DEVICE_KEY = 'icare_registered_device_secret_v1';
+    function send() {
+      try {
+        var s = localStorage.getItem(DEVICE_KEY);
+        if (s && /^[A-Za-z0-9_-]{32,128}$/.test(s)) {
+          _postMessage({ type: 'DEVICE_SECRET', secret: s });
+          log('info', 'DEVICE_SECRET sent to native (' + s.length + ' chars)');
+          return true;
+        }
+      } catch (e) {}
+      return false;
+    }
+    if (!send()) {
+      setTimeout(function() { send(); }, 2000);
+    }
+  })();
+
   // Check current URL in case the WebView was restored on a chapter URL.
   setTimeout(checkUrl, 800);
   true;
@@ -757,6 +777,13 @@ export default function ExploreScreen() {
           }
           break;
 
+        case 'DEVICE_SECRET':
+          if (typeof msg.secret === 'string' && /^[A-Za-z0-9_-]{32,128}$/.test(msg.secret)) {
+            _storeDeviceSecret(msg.secret);
+            console.log(`[explore] DEVICE_SECRET stored (${(msg.secret as string).length} chars)`);
+          }
+          break;
+
         default:
           // Unknown message types are silently discarded.
           break;
@@ -843,21 +870,31 @@ function _setTokenRequester(fn: ((chapterId: string) => void) | null): void {
   _tokenRequester = fn;
 }
 
-// ─── Auth JWT store ───────────────────────────────────────────────────────────
+// ─── Auth JWT + device secret store ──────────────────────────────────────────
 //
-// The injected JS sends the user's auth JWT via AUTH_JWT message while the
-// WebView is in the foreground.  Native stores it here so the player can call
-// getMuxToken directly (with Authorization header) when the WebView is
-// backgrounded and postMessage is suppressed by Android.
+// The injected JS sends the user's auth JWT via AUTH_JWT message and the
+// registered device secret via DEVICE_SECRET message while the WebView is in
+// the foreground.  Native stores both here so the player and download manager
+// can call Base44 functions directly (with correct auth + device headers) when
+// the WebView is backgrounded.
 
 let _authJwt: string | null = null;
+let _deviceSecret: string | null = null;
 
 function _storeAuthJwt(jwt: string): void {
   _authJwt = jwt;
 }
 
+function _storeDeviceSecret(secret: string): void {
+  _deviceSecret = secret;
+}
+
 export function getAuthJwt(): string | null {
   return _authJwt;
+}
+
+export function getDeviceSecret(): string | null {
+  return _deviceSecret;
 }
 
 /**
