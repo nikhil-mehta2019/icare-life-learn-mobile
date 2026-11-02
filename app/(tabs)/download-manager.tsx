@@ -19,7 +19,7 @@ import {
   type Course,
   type Module,
 } from '../../api/base44Client';
-import { getAuthJwt } from './explore';
+import { getAuthJwt, getDeviceSecret } from './explore';
 import IcareOfflineDrm, { type DeviceStorageStats, type DownloadInfo } from '../../modules/icare-offline-drm';
 import {
   estimateChapterDownloadBytes,
@@ -85,11 +85,12 @@ export default function DownloadManagerScreen() {
       setStorage(device);
 
       const jwt = getAuthJwt();
+      const deviceSecret = getDeviceSecret();
       const courseBundles: CourseBundle[] = [];
       for (const course of courses.filter((item) => item.status !== 'archived')) {
         try {
           if (jwt) {
-            const access = await resolveStudentAccessWithJwt(course.id, jwt);
+            const access = await resolveStudentAccessWithJwt(course.id, jwt, deviceSecret);
             if (!access.data?.hasCourseAccess) continue;
           }
           const modules = await fetchModules(course.id);
