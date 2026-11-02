@@ -2,14 +2,17 @@
 // move this to a runtime config fetched after auth, or use per-user signed
 // tokens served by a Base44 backend function.
 
+import { Platform } from 'react-native';
 import IcareOfflineDrm from '../modules/icare-offline-drm';
 
 export const BASE_URL = 'https://icare-life-learn.base44.app/api';
 export const API_KEY = '6af260f41e2140b9950788621360c5cf';
 
+// Base44 now rejects the account API key with 403 AccountApiKeyBlockedError, while the same
+// public requests succeed without it. Android keeps sending the key unchanged; iOS omits it.
 const defaultHeaders: Record<string, string> = {
   'Content-Type': 'application/json',
-  'api_key': API_KEY,
+  ...(Platform.OS === 'android' ? { 'api_key': API_KEY } : {}),
 };
 
 export interface Course {
