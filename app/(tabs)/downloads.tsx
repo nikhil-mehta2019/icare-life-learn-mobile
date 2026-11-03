@@ -426,6 +426,16 @@ type Section =
   | { type: 'course'; courseName: string; modules: { moduleName: string; items: EnrichedDownload[] }[] }
   | { type: 'empty' };
 
+/** iOS only: courses can share a title (e.g. the India and International editions of the same
+ *  course), so tell them apart by market. Other platforms keep the plain title. */
+function courseLabel(course?: { title?: string; catalogMarket?: string } | null): string {
+  const title = course?.title ?? '';
+  if (Platform.OS !== 'ios' || !title) return title;
+  const market = String(course?.catalogMarket ?? '').toLowerCase();
+  const tag = market === 'india' ? 'India' : market === 'international' ? 'International' : '';
+  return tag ? `${title} · ${tag}` : title;
+}
+
 export default function DownloadsScreen() {
   const router = useRouter();
   const [items, setItems] = useState<DownloadInfo[]>([]);
@@ -578,7 +588,7 @@ export default function DownloadsScreen() {
           if (!(chapter.courseId in courseCache)) {
             try {
               const { data } = await fetchCourse(chapter.courseId);
-              courseCache[chapter.courseId] = data?.title ?? '';
+              courseCache[chapter.courseId] = courseLabel(data);
             } catch { courseCache[chapter.courseId] = ''; }
           }
           if (!(chapter.moduleId in moduleCache)) {

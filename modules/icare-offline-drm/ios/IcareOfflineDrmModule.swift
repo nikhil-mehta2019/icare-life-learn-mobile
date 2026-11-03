@@ -84,6 +84,32 @@ public class IcareOfflineDrmModule: Module {
       return OfflineDownloadManager.shared.storageStats()
     }.runOnQueue(.main)
 
+    // Lets the offline player rotate to landscape (video full screen). The app stays
+    // portrait everywhere else; see IcareOrientationSubscriber.
+    AsyncFunction("setLandscapeAllowed") { (allowed: Bool) in
+      IcareOrientationState.landscapeAllowed = allowed
+      if let scene = UIApplication.shared.connectedScenes.first(where: { $0 is UIWindowScene }) as? UIWindowScene {
+        scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+        if !allowed {
+          scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait)) { _ in }
+        }
+      }
+    }.runOnQueue(.main)
+
+    // A video entered / left full screen (online WebView player or offline player):
+    // rotate to landscape while it is full screen, back to portrait afterwards.
+    AsyncFunction("setFullscreenLandscape") { (active: Bool) in
+      IcareOrientationState.fullscreenActive = active
+      if let scene = UIApplication.shared.connectedScenes.first(where: { $0 is UIWindowScene }) as? UIWindowScene {
+        scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+        if active {
+          scene.requestGeometryUpdate(.iOS(interfaceOrientations: .landscape)) { _ in }
+        } else {
+          scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait)) { _ in }
+        }
+      }
+    }.runOnQueue(.main)
+
     // Non-DRM downloads carry no license; nothing to renew. Kept for API parity.
     AsyncFunction("renewOfflineLicense") { (_: String, _: String, _: String) in }
   }
@@ -243,6 +269,14 @@ final class OfflineDownloadManager: NSObject, AVAssetDownloadDelegate {
         )
       }
       fairPlay = (license, certificate)
+      #if targetEnvironment(simulator)
+      // AVContentKeySession raises an uncatchable NSInvalidArgumentException for
+      // FairPlay in the Simulator (key system unsupported). Fail with a message
+      // instead of crashing; protected downloads need a physical iPhone.
+      throw OfflineDownloadError(
+        message: "Protected lessons can only be downloaded on a physical iPhone, not in the Simulator."
+      )
+      #endif
     }
     guard let url = URL(string: params.manifestUrl), url.scheme?.hasPrefix("http") == true else {
       throw OfflineDownloadError(message: "Invalid stream URL")
@@ -270,18 +304,24 @@ final class OfflineDownloadManager: NSObject, AVAssetDownloadDelegate {
       let keySession = AVContentKeySession(keySystem: .fairPlayStreaming)
       keySession.setDelegate(delegate, queue: DispatchQueue.main)
       keySession.addContentKeyRecipient(asset)
+      // Without this AVFoundation never requests the key during an offline download,
+      // so no persistable key is stored (observed on device: video complete, key missing).
+      asset.resourceLoader.preloadsEligibleContentKeys = true
       keySessions[id] = (keySession, delegate)
+      FairPlayDiag.log(id, "key session created; recipient added; preloadsEligibleContentKeys=true")
     }
 
     let config = AVAssetDownloadConfiguration(asset: asset, title: params.title ?? "Lesson")
 
-    // Honour the learner's audio/caption language choice when the stream offers it.
-    if let selection = await mediaSelection(
+    // Download one audio and one subtitle rendition per preferred language the stream offers.
+    let selections = await mediaSelections(
       for: asset,
+      id: id,
       audio: params.audioLanguages ?? [],
       captions: params.captionLanguages ?? []
-    ) {
-      config.primaryContentConfiguration.mediaSelections = [selection]
+    )
+    if !selections.isEmpty {
+      config.primaryContentConfiguration.mediaSelections = selections
     }
 
     let task = session.makeAssetDownloadTask(downloadConfiguration: config)
@@ -427,6 +467,7 @@ final class OfflineDownloadManager: NSObject, AVAssetDownloadDelegate {
     guard let id = task.taskDescription, var record = stored[id] else { return }
     tasks[id] = nil
     keySessions[id] = nil
+    FairPlayDiag.log(id, "download task finished: error=\(error.map { ($0 as NSError).domain + "/" + String(($0 as NSError).code) } ?? "none") drm=\(record.drmType ?? "none") keyStored=\(FairPlayKeychain.exists(id: id))")
     if let error = error as NSError? {
       if error.domain == NSURLErrorDomain && error.code == NSURLErrorCancelled {
         // Cancelled by remove(); record is already gone or reset.
@@ -435,11 +476,20 @@ final class OfflineDownloadManager: NSObject, AVAssetDownloadDelegate {
       record.state = "failed"
       record.failureReason = error.localizedDescription
       notify(title: "Download failed", body: record.title ?? "Lesson", id: id)
-    } else if record.drmType == "fairplay" && !FairPlayKeychain.exists(id: id) {
+    } else if record.drmType == "fairplay"
+                && downloadDeclaresFairPlayKeys(record)
+                && !FairPlayKeychain.exists(id: id) {
+      // The stream really is FairPlay-encrypted but no persistable key was stored.
       record.state = "failed"
       record.failureReason = "The protected lesson downloaded but its licence key was not stored."
+      FairPlayDiag.log(id, "FAILED: playlists declare FairPlay keys but none was stored")
       notify(title: "Download failed", body: record.title ?? "Lesson", id: id)
     } else {
+      if record.drmType == "fairplay" && !downloadDeclaresFairPlayKeys(record) {
+        // DRM course, but this lesson's stream is not encrypted: treat as a plain download.
+        FairPlayDiag.log(id, "playlists declare no FairPlay keys: clear content, completing without a key")
+        record.drmType = nil
+      }
       record.state = "completed"
       record.percent = 100
       record.failureReason = nil
@@ -453,45 +503,66 @@ final class OfflineDownloadManager: NSObject, AVAssetDownloadDelegate {
 
   // MARK: Language selection
 
-  private func mediaSelection(
-    for asset: AVURLAsset, audio: [String], captions: [String]
-  ) async -> AVMediaSelection? {
-    guard !audio.isEmpty || !captions.isEmpty else { return nil }
-    var changed = false
+  private func mediaSelections(
+    for asset: AVURLAsset, id: String, audio: [String], captions: [String]
+  ) async -> [AVMediaSelection] {
+    FairPlayDiag.log(id, "languages requested: audio=\(audio) captions=\(captions)")
+    guard !audio.isEmpty || !captions.isEmpty else { return [] }
     do {
       let preferred = try await asset.load(.preferredMediaSelection)
-      guard let mutable = preferred.mutableCopy() as? AVMutableMediaSelection else { return nil }
-      if !audio.isEmpty,
-         let group = try await asset.loadMediaSelectionGroup(for: .audible),
-         let option = bestOption(in: group, languages: audio) {
-        mutable.select(option, in: group)
-        changed = true
+      let audioGroup = try await asset.loadMediaSelectionGroup(for: .audible)
+      let captionGroup = try await asset.loadMediaSelectionGroup(for: .legible)
+
+      func tags(_ options: [AVMediaSelectionOption]) -> String {
+        return options.map { $0.locale?.identifier ?? $0.displayName }.joined(separator: ",")
       }
-      if !captions.isEmpty,
-         let group = try await asset.loadMediaSelectionGroup(for: .legible),
-         let option = bestOption(in: group, languages: captions) {
-        mutable.select(option, in: group)
-        changed = true
+      FairPlayDiag.log(id, "stream offers audio=[\(tags(audioGroup?.options ?? []))] captions=[\(tags(captionGroup?.options ?? []))]")
+
+      let audioOptions = options(in: audioGroup, languages: audio)
+      let captionOptions = options(in: captionGroup, languages: captions)
+      FairPlayDiag.log(id, "matched audio=[\(tags(audioOptions))] captions=[\(tags(captionOptions))]")
+      guard !audioOptions.isEmpty || !captionOptions.isEmpty else { return [] }
+
+      func make(_ a: AVMediaSelectionOption?, _ c: AVMediaSelectionOption?) -> AVMediaSelection? {
+        guard let m = preferred.mutableCopy() as? AVMutableMediaSelection else { return nil }
+        if let a = a, let g = audioGroup { m.select(a, in: g) }
+        if let c = c, let g = captionGroup { m.select(c, in: g) }
+        return m
       }
-      return changed ? mutable : nil
+
+      // A selection holds one option per group, so request one selection per extra
+      // rendition; the union of these is what gets downloaded.
+      var out: [AVMediaSelection] = []
+      if audioOptions.isEmpty {
+        for c in captionOptions { if let s = make(nil, c) { out.append(s) } }
+      } else {
+        for a in audioOptions { if let s = make(a, captionOptions.first) { out.append(s) } }
+        for c in captionOptions.dropFirst() { if let s = make(audioOptions.first, c) { out.append(s) } }
+      }
+      FairPlayDiag.log(id, "requesting \(out.count) media selections")
+      return out
     } catch {
-      return nil
+      FairPlayDiag.log(id, "language selection failed: \(error.localizedDescription)")
+      return []
     }
   }
 
-  private func bestOption(
-    in group: AVMediaSelectionGroup, languages: [String]
-  ) -> AVMediaSelectionOption? {
+  /// One option per requested language (first match, in the learner's order, no duplicates).
+  private func options(
+    in group: AVMediaSelectionGroup?, languages: [String]
+  ) -> [AVMediaSelectionOption] {
+    guard let group = group else { return [] }
+    var out: [AVMediaSelectionOption] = []
     for wanted in languages {
       let base = wanted.lowercased().replacingOccurrences(of: "_", with: "-")
         .split(separator: "-").first.map(String.init) ?? wanted.lowercased()
       if let match = group.options.first(where: {
         ($0.locale?.language.languageCode?.identifier ?? "").lowercased() == base
-      }) {
-        return match
+      }), !out.contains(match) {
+        out.append(match)
       }
     }
-    return nil
+    return out
   }
 
   // MARK: Notifications (iOS counterpart of Android's download notification)
@@ -538,6 +609,27 @@ final class OfflineDownloadManager: NSObject, AVAssetDownloadDelegate {
     record.relativePath = location.relativePath
     stored[id] = record
     save()
+  }
+
+  /// True when any downloaded playlist declares a FairPlay key (EXT-X-KEY / SESSION-KEY
+  /// with the com.apple.streamingkeydelivery key format). Used to tell an encrypted
+  /// lesson from a plain one inside a DRM-mode course.
+  private func downloadDeclaresFairPlayKeys(_ record: StoredDownload) -> Bool {
+    guard let root = resolveLocation(record),
+          let walker = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)
+    else { return true } // cannot inspect: stay strict
+    var scanned = 0
+    for case let file as URL in walker where file.pathExtension.lowercased() == "m3u8" {
+      scanned += 1
+      guard let text = try? String(contentsOf: file, encoding: .utf8) else { continue }
+      if text.contains("com.apple.streamingkeydelivery")
+          || text.contains("#EXT-X-SESSION-KEY") {
+        FairPlayDiag.log(record.id, "playlist declares FairPlay key (\(scanned) playlists scanned)")
+        return true
+      }
+    }
+    FairPlayDiag.log(record.id, "no FairPlay key declared in \(scanned) playlists")
+    return false
   }
 
   private func resolveLocation(_ record: StoredDownload) -> URL? {
@@ -653,6 +745,7 @@ final class FairPlayDownloadKeyDelegate: NSObject, AVContentKeySessionDelegate {
 
   // Ask for a persistable key so the licence can be reused offline.
   func contentKeySession(_ session: AVContentKeySession, didProvide keyRequest: AVContentKeyRequest) {
+    FairPlayDiag.log(downloadId, "didProvide AVContentKeyRequest id=\(FairPlayDiag.describe(keyRequest.identifier))")
     do {
       try keyRequest.respondByRequestingPersistableContentKeyRequestAndReturnError()
     } catch {
@@ -663,6 +756,7 @@ final class FairPlayDownloadKeyDelegate: NSObject, AVContentKeySessionDelegate {
   func contentKeySession(
     _ session: AVContentKeySession, didProvide keyRequest: AVPersistableContentKeyRequest
   ) {
+    FairPlayDiag.log(downloadId, "didProvide AVPersistableContentKeyRequest id=\(FairPlayDiag.describe(keyRequest.identifier))")
     guard let identifier = keyRequest.identifier as? String,
           let skd = URL(string: identifier),
           let contentId = (skd.host ?? identifier).data(using: .utf8)
@@ -675,31 +769,39 @@ final class FairPlayDownloadKeyDelegate: NSObject, AVContentKeySessionDelegate {
       guard let self = self else { return }
       switch result {
       case .failure(let error):
+        FairPlayDiag.log(self.downloadId, "certificate FAILED: \(error.localizedDescription)")
         self.onFailure?("FairPlay certificate: \(error.localizedDescription)")
       case .success(let certificate):
+        FairPlayDiag.log(self.downloadId, "certificate ok (\(certificate.count) bytes)")
         keyRequest.makeStreamingContentKeyRequestData(
           forApp: certificate,
           contentIdentifier: contentId,
           options: [AVContentKeyRequestProtocolVersionsKey: [1]]
         ) { spc, error in
           guard let spc = spc, error == nil else {
+            FairPlayDiag.log(self.downloadId, "SPC FAILED: \(error?.localizedDescription ?? "unknown")")
             self.onFailure?("FairPlay SPC: \(error?.localizedDescription ?? "unknown error")")
             return
           }
+          FairPlayDiag.log(self.downloadId, "SPC built (\(spc.count) bytes); requesting licence")
           self.requestKeyResponse(spc: spc) { ckcResult in
             switch ckcResult {
             case .failure(let error):
+              FairPlayDiag.log(self.downloadId, "licence FAILED: \(error.localizedDescription)")
               self.onFailure?("FairPlay licence: \(error.localizedDescription)")
             case .success(let ckc):
+              FairPlayDiag.log(self.downloadId, "licence ok (\(ckc.count) bytes)")
               do {
                 let persistentKey = try keyRequest.persistableContentKey(
                   fromKeyVendorResponse: ckc, options: nil
                 )
                 FairPlayKeychain.save(persistentKey, id: self.downloadId)
+                FairPlayDiag.log(self.downloadId, "persistent key saved to Keychain (\(persistentKey.count) bytes)")
                 keyRequest.processContentKeyResponse(
                   AVContentKeyResponse(fairPlayStreamingKeyResponseData: persistentKey)
                 )
               } catch {
+                FairPlayDiag.log(self.downloadId, "persistable key FAILED: \(error.localizedDescription)")
                 self.onFailure?("FairPlay key: \(error.localizedDescription)")
               }
             }
@@ -713,6 +815,7 @@ final class FairPlayDownloadKeyDelegate: NSObject, AVContentKeySessionDelegate {
     _ session: AVContentKeySession, contentKeyRequest keyRequest: AVContentKeyRequest,
     didFailWithError err: Error
   ) {
+    FairPlayDiag.log(downloadId, "content key request FAILED: \(err.localizedDescription)")
     onFailure?("FairPlay: \(err.localizedDescription)")
   }
 
@@ -729,6 +832,7 @@ final class FairPlayDownloadKeyDelegate: NSObject, AVContentKeySessionDelegate {
             let data = data, !data.isEmpty
       else {
         let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+        FairPlayDiag.log(self?.downloadId ?? "?", "certificate HTTP \(code), \(data?.count ?? 0) bytes")
         return completion(.failure(OfflineDownloadError(message: "certificate request failed (HTTP \(code))")))
       }
       self?.certificate = data
@@ -749,6 +853,7 @@ final class FairPlayDownloadKeyDelegate: NSObject, AVContentKeySessionDelegate {
             let data = data, !data.isEmpty
       else {
         let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+        FairPlayDiag.log(self.downloadId, "licence HTTP \(code), \(data?.count ?? 0) bytes")
         return completion(.failure(OfflineDownloadError(message: "licence request failed (HTTP \(code))")))
       }
       completion(.success(FairPlayDownloadKeyDelegate.normalizeKeyResponse(data)))
@@ -780,5 +885,49 @@ final class FairPlayDownloadKeyDelegate: NSObject, AVContentKeySessionDelegate {
       components.queryItems = items
     }
     return components.url ?? url
+  }
+}
+
+/// Small on-device trail of FairPlay steps (no tokens or key material), kept in
+/// UserDefaults under `life.icare.offline.fairplay.diag` so it can be pulled from
+/// a device with `devicectl ... copy from` for troubleshooting.
+enum FairPlayDiag {
+  private static let key = "life.icare.offline.fairplay.diag"
+  private static let lock = NSLock()
+
+  static func log(_ id: String, _ message: String) {
+    lock.lock(); defer { lock.unlock() }
+    let stamp = ISO8601DateFormatter().string(from: Date())
+    var lines = UserDefaults.standard.stringArray(forKey: key) ?? []
+    lines.append("\(stamp) [\(id.prefix(8))] \(message)")
+    if lines.count > 200 { lines.removeFirst(lines.count - 200) }
+    UserDefaults.standard.set(lines, forKey: key)
+  }
+
+  /// Key identifiers are skd:// URIs; log scheme/host only.
+  static func describe(_ identifier: Any?) -> String {
+    guard let text = identifier as? String else { return String(describing: identifier) }
+    if let url = URL(string: text), let host = url.host { return "\(url.scheme ?? "?")://\(host.prefix(12))…" }
+    return "\(text.prefix(24))…"
+  }
+}
+
+// MARK: - Orientation (portrait app; landscape only for video)
+
+enum IcareOrientationState {
+  /// Only touched on the main queue.
+  static var landscapeAllowed = false   // offline player screen is open
+  static var fullscreenActive = false   // a video is in full screen (web or native)
+}
+
+/// Keeps the app portrait-only (as before) unless the offline player asks for landscape.
+/// Expo uses the intersection of all subscriber masks instead of the Info.plist value.
+public class IcareOrientationSubscriber: ExpoAppDelegateSubscriber {
+  public func application(
+    _ application: UIApplication,
+    supportedInterfaceOrientationsFor window: UIWindow?
+  ) -> UIInterfaceOrientationMask {
+    let landscape = IcareOrientationState.landscapeAllowed || IcareOrientationState.fullscreenActive
+    return landscape ? [.portrait, .landscapeLeft, .landscapeRight] : .portrait
   }
 }

@@ -54,6 +54,8 @@ import type { ShouldStartLoadRequest } from 'react-native-webview/lib/WebViewTyp
 import { deliverPlayerData, deliverPlayerError } from '../../api/playerCache';
 import { API_KEY, BASE_URL } from '../../api/base44Client';
 import IcareOfflineDrm from '../../modules/icare-offline-drm';
+import { IOS_WEB_FULLSCREEN_POLYFILL } from '../../utils/webFullscreenPolyfill';
+import { setWebFullscreen } from '../../store/webFullscreen';
 
 const BASE44_URL = 'https://icare-life-learn.base44.app';
 
@@ -607,9 +609,40 @@ const INJECTED_JS = `
 })();
 `.trim();
 
+// iOS only: tell native when a video enters / leaves full screen so the app can rotate to
+// landscape (the app is portrait-only otherwise). Also reports play events for diagnostics.
+const IOS_FULLSCREEN_JS = `
+(function() {
+  if (window.__icareFsInstalled) return;
+  window.__icareFsInstalled = true;
+  function post(o) {
+    try { window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify(o)); } catch (e) {}
+  }
+  function isActive() {
+    return !!(document.fullscreenElement || document.webkitFullscreenElement || window.__icareVideoFs);
+  }
+  function notify(src) { post({ type: 'FULLSCREEN_CHANGE', active: isActive(), source: src }); }
+  ['fullscreenchange', 'webkitfullscreenchange'].forEach(function(n) {
+    document.addEventListener(n, function() { notify(n); }, true);
+  });
+  document.addEventListener('webkitbeginfullscreen', function() { window.__icareVideoFs = true; notify('webkitbeginfullscreen'); }, true);
+  document.addEventListener('webkitendfullscreen', function() { window.__icareVideoFs = false; notify('webkitendfullscreen'); }, true);
+  document.addEventListener('play', function(e) {
+    post({ type: 'FS_DIAG', event: 'play', tag: e.target && e.target.tagName });
+  }, true);
+})();
+`;
+
+
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export default function ExploreScreen() {
+  // iOS: never leave the tab bar hidden / the app landscape if this screen goes away mid full screen.
+  useEffect(() => () => {
+    if (Platform.OS !== 'ios') return;
+    setWebFullscreen(false);
+    IcareOfflineDrm.setFullscreenLandscape(false);
+  }, []);
   const router = useRouter();
   const webRef = useRef<WebView>(null);
 
@@ -777,6 +810,19 @@ export default function ExploreScreen() {
           }
           break;
 
+        case 'FULLSCREEN_CHANGE':
+          // iOS: the web player went full screen / back (see IOS_FULLSCREEN_JS).
+          console.log(`[explore] FULLSCREEN_CHANGE active=${String(msg.active)} source=${String(msg.source)}`);
+          if (Platform.OS === 'ios') {
+            setWebFullscreen(!!msg.active);
+            IcareOfflineDrm.setFullscreenLandscape(!!msg.active);
+          }
+          break;
+
+        case 'FS_DIAG':
+          console.log(`[explore] web video event ${String(msg.event)} on <${String(msg.tag)}>`);
+          break;
+
         case 'DEVICE_SECRET':
           if (typeof msg.secret === 'string' && /^[A-Za-z0-9_-]{32,128}$/.test(msg.secret)) {
             _storeDeviceSecret(msg.secret);
@@ -850,7 +896,13 @@ export default function ExploreScreen() {
       allowsFullscreenVideo
       mediaPlaybackRequiresUserAction={false}
       androidLayerType="hardware"
-      injectedJavaScriptBeforeContentLoaded={INJECTED_JS}
+      onLoadStart={() => {
+        // A fresh page load ends any full screen the previous page was in (iOS).
+        if (Platform.OS !== 'ios') return;
+        setWebFullscreen(false);
+        IcareOfflineDrm.setFullscreenLandscape(false);
+      }}
+      injectedJavaScriptBeforeContentLoaded={Platform.OS === 'ios' ? INJECTED_JS + IOS_FULLSCREEN_JS + IOS_WEB_FULLSCREEN_POLYFILL : INJECTED_JS}
       onShouldStartLoadWithRequest={onShouldStartLoadWithRequest}
       onMessage={onMessage}
       userAgent="Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"

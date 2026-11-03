@@ -40,6 +40,33 @@ function selectAvailableLanguages(available: string[], preferred: string[]): str
   return matched.length ? matched : undefined;
 }
 
+function withoutToken(url: string): string {
+  return url.replace(/([?&])token=[^&]*&?/, '$1').replace(/[?&]$/, '');
+}
+
+/**
+ * iOS only. The download endpoint attaches a signed `token=` to the stream URL even when the
+ * playback ID is public, and Mux rejects a token on a public ID (HTTP 400 "Invalid
+ * Parameters"), so the download fails before it starts. Drop the token for public IDs;
+ * if a tokened URL is still refused with 400, retry it without the token.
+ */
+async function usableManifestUrl(url: string, chapter: Chapter, playbackId: string): Promise<string> {
+  if (Platform.OS !== 'ios' || !/[?&]token=/.test(url)) return url;
+  const isPublicId = playbackId === chapter.muxPlaybackId;
+  if (isPublicId) return withoutToken(url);
+  try {
+    const res = await fetch(url, { method: 'GET' });
+    if (res.status === 400) {
+      const bare = withoutToken(url);
+      const retry = await fetch(bare, { method: 'GET' });
+      if (retry.ok) return bare;
+    }
+  } catch {
+    /* offline or blocked: let the download report the real error */
+  }
+  return url;
+}
+
 export async function queueChapterForOffline(chapter: Chapter, jwt: string): Promise<void> {
   const playbackId = selectMuxPlaybackId(chapter);
   if (!playbackId) throw new Error(`${chapter.title} has no downloadable video.`);
@@ -55,6 +82,7 @@ export async function queueChapterForOffline(chapter: Chapter, jwt: string): Pro
   ]);
 
   if (!tokens.manifestUrl) throw new Error(`Could not prepare ${chapter.title} for download.`);
+  const manifestUrl = await usableManifestUrl(tokens.manifestUrl, chapter, playbackId);
 
   const preferred = preferences?.preferredLanguages?.length
     ? preferences.preferredLanguages.slice(0, 3)
@@ -69,7 +97,7 @@ export async function queueChapterForOffline(chapter: Chapter, jwt: string): Pro
 
   await IcareOfflineDrm.startDownload({
     id: chapter.id,
-    manifestUrl: tokens.manifestUrl,
+    manifestUrl,
     drmLicenseUrl: treatAsDrm ? (tokens.widevineLicenseUrl ?? '') : '',
     drmToken: treatAsDrm ? (tokens.drmToken ?? '') : '',
     // iOS only: FairPlay endpoints, sent only when the lesson is really DRM.

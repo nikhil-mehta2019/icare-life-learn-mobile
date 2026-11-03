@@ -49,6 +49,7 @@
         }
       ],
       "./modules/icare-offline-drm/app.plugin.js",
+      "./plugins/withIosLandscapeOrientations",
       "expo-secure-store",
       "expo-web-browser"
     ],

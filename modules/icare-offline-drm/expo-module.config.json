@@ -1,5 +1,8 @@
 {
-  "platforms": ["android", "ios"],
+  "platforms": [
+    "android",
+    "ios"
+  ],
   "android": {
     "modules": [
       "expo.modules.icareofflinedrm.IcareOfflineDrmModule",
@@ -12,6 +15,9 @@
       "IcareOfflineDrmModule",
       "IcareDownloadManagerModule",
       "IcareLanguagePreferencesModule"
+    ],
+    "appDelegateSubscribers": [
+      "IcareOrientationSubscriber"
     ]
   }
 }
