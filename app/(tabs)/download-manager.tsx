@@ -251,7 +251,15 @@ export default function DownloadManagerScreen() {
 
     setQueueing(false);
     setSelected(new Set());
-    await load();
+
+    // Refresh only the downloads list (not the full course/module tree) so the
+    // UI doesn't blank out while re-fetching all courses again.
+    try {
+      const existing = await IcareOfflineDrm.listDownloads();
+      const byId: Record<string, DownloadInfo> = {};
+      for (const item of existing) byId[item.id] = item;
+      setDownloads(byId);
+    } catch { /* ignore — stale download state is non-critical */ }
 
     if (queued > 0) {
       Alert.alert(
@@ -262,7 +270,7 @@ export default function DownloadManagerScreen() {
     } else {
       Alert.alert('Nothing queued', failures[0] ?? 'Please try again.');
     }
-  }, [selectedChapters, queueing, enoughStorage, estimatedBytes, load, router]);
+  }, [selectedChapters, queueing, enoughStorage, estimatedBytes, router]);
 
   if (loading) {
     return <View style={styles.center}><ActivityIndicator size="large" color={ACCENT} /><Text style={styles.muted}>Loading downloadable lessons…</Text></View>;
