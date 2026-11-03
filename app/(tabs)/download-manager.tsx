@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -58,9 +58,13 @@ function isDownloadableVideo(chapter: Chapter) {
   );
 }
 
+// Per-course loading state shown while modules/chapters are still fetching
+type CourseLoadState = 'loading' | 'done' | 'error';
+
 export default function DownloadManagerScreen() {
   const router = useRouter();
   const [bundles, setBundles] = useState<CourseBundle[]>([]);
+  const [courseStates, setCourseStates] = useState<Record<string, CourseLoadState>>({});
   const [downloads, setDownloads] = useState<Record<string, DownloadInfo>>({});
   const [storage, setStorage] = useState<DeviceStorageStats>(ZERO_STORAGE);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -71,13 +75,20 @@ export default function DownloadManagerScreen() {
   const [queueing, setQueueing] = useState(false);
   const [queueProgress, setQueueProgress] = useState({ done: 0, total: 0 });
 
+  // Stable ref so in-flight course loads can detect a newer load cycle started
+  const loadGenRef = useRef(0);
+
   const load = useCallback(async () => {
+    const gen = ++loadGenRef.current;
+
     try {
       const [courses, existing, device] = await Promise.all([
         fetchCourses({ status: 'published' }, 100),
         IcareOfflineDrm.listDownloads(),
         IcareOfflineDrm.getDeviceStorageStats().catch(() => ZERO_STORAGE),
       ]);
+
+      if (gen !== loadGenRef.current) return; // stale — a newer load started
 
       const byId: Record<string, DownloadInfo> = {};
       for (const item of existing) byId[item.id] = item;
@@ -86,31 +97,76 @@ export default function DownloadManagerScreen() {
 
       const jwt = getAuthJwt();
       const deviceSecret = getDeviceSecret();
-      const courseBundles: CourseBundle[] = [];
-      for (const course of courses.filter((item) => item.status !== 'archived')) {
-        try {
-          if (jwt) {
-            const access = await resolveStudentAccessWithJwt(course.id, jwt, deviceSecret);
-            if (!access.data?.hasCourseAccess) continue;
+      const activeCourses = courses.filter((c) => c.status !== 'archived');
+
+      // Show screen immediately with empty list — courses stream in below
+      setBundles([]);
+      setCourseStates({});
+      setLoading(false);
+
+      // Resolve access for all courses in parallel, then load each accessible
+      // course's modules+chapters in parallel. Each course updates the UI as
+      // soon as it finishes — student can interact with Course 1 while Course 2
+      // is still loading.
+      await Promise.allSettled(
+        activeCourses.map(async (course) => {
+          try {
+            if (jwt) {
+              const access = await resolveStudentAccessWithJwt(course.id, jwt, deviceSecret);
+              if (!access.data?.hasCourseAccess) return;
+            }
+
+            if (gen !== loadGenRef.current) return;
+
+            // Mark this course as loading so we can show a per-course indicator
+            setCourseStates((prev) => ({ ...prev, [course.id]: 'loading' }));
+
+            const modules = await fetchModules(course.id);
+
+            if (gen !== loadGenRef.current) return;
+
+            // Fetch all chapters for this course's modules in parallel
+            const moduleBundles: ModuleBundle[] = [];
+            await Promise.allSettled(
+              modules.map(async (module) => {
+                try {
+                  const chapters = (await fetchChapters(module.id)).filter(isDownloadableVideo);
+                  if (chapters.length) moduleBundles.push({ module, chapters });
+                } catch { /* skip failed module, keep others */ }
+              })
+            );
+
+            if (gen !== loadGenRef.current) return;
+
+            // Restore original module order (Promise.allSettled may resolve out of order)
+            moduleBundles.sort((a, b) => modules.indexOf(a.module) - modules.indexOf(b.module));
+
+            if (moduleBundles.length) {
+              // Append course immediately — student sees it without waiting for others
+              setBundles((prev) => {
+                // Preserve original course order
+                const next = [...prev, { course, modules: moduleBundles }];
+                next.sort((a, b) => activeCourses.indexOf(a.course) - activeCourses.indexOf(b.course));
+                // Auto-expand first course
+                if (next.length === 1) {
+                  setExpandedCourses((c) => c.size ? c : new Set([next[0].course.id]));
+                }
+                return next;
+              });
+            }
+
+            setCourseStates((prev) => ({ ...prev, [course.id]: 'done' }));
+          } catch {
+            setCourseStates((prev) => ({ ...prev, [course.id]: 'error' }));
           }
-          const modules = await fetchModules(course.id);
-          const moduleBundles: ModuleBundle[] = [];
-          for (const module of modules) {
-            try {
-              const chapters = (await fetchChapters(module.id)).filter(isDownloadableVideo);
-              if (chapters.length) moduleBundles.push({ module, chapters });
-            } catch { /* keep other modules */ }
-          }
-          if (moduleBundles.length) courseBundles.push({ course, modules: moduleBundles });
-        } catch { /* keep other courses */ }
-      }
-      setBundles(courseBundles);
-      setExpandedCourses((current) => current.size ? current : new Set(courseBundles.slice(0, 1).map((item) => item.course.id)));
+        })
+      );
     } catch (error: any) {
+      if (gen !== loadGenRef.current) return;
+      setLoading(false);
       Alert.alert('Could not load downloads', error?.message ?? String(error));
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (gen === loadGenRef.current) setRefreshing(false);
     }
   }, []);
 
@@ -176,6 +232,7 @@ export default function DownloadManagerScreen() {
       return;
     }
 
+    const deviceSecret = getDeviceSecret();
     setQueueing(true);
     setQueueProgress({ done: 0, total: selectedChapters.length });
     let queued = 0;
@@ -184,7 +241,7 @@ export default function DownloadManagerScreen() {
     for (let index = 0; index < selectedChapters.length; index += 1) {
       const chapter = selectedChapters[index];
       try {
-        await queueChapterForOffline(chapter, jwt);
+        await queueChapterForOffline(chapter, jwt, deviceSecret);
         queued += 1;
       } catch (error: any) {
         failures.push(`${chapter.title}: ${error?.message ?? 'Could not authorize download'}`);
@@ -285,7 +342,17 @@ export default function DownloadManagerScreen() {
           );
         })}
 
-        {!bundles.length && <View style={styles.empty}><Text style={styles.emptyTitle}>No downloadable videos found</Text><Text style={styles.meta}>Pull to refresh after opening your course in Learn.</Text></View>}
+        {/* Per-course loading indicators — shown while that course's modules/chapters are still fetching */}
+        {Object.entries(courseStates).filter(([, s]) => s === 'loading').map(([id]) => (
+          <View key={id} style={[styles.courseCard, { flexDirection: 'row', alignItems: 'center', padding: 14, gap: 12 }]}>
+            <ActivityIndicator size="small" color={ACCENT} />
+            <Text style={styles.muted}>Loading course…</Text>
+          </View>
+        ))}
+
+        {!bundles.length && Object.keys(courseStates).length === 0 && (
+          <View style={styles.empty}><Text style={styles.emptyTitle}>No downloadable videos found</Text><Text style={styles.meta}>Pull to refresh after opening your course in Learn.</Text></View>
+        )}
       </ScrollView>
 
       <View style={styles.footer}>

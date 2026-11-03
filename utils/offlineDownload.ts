@@ -67,7 +67,7 @@ async function usableManifestUrl(url: string, chapter: Chapter, playbackId: stri
   return url;
 }
 
-export async function queueChapterForOffline(chapter: Chapter, jwt: string): Promise<void> {
+export async function queueChapterForOffline(chapter: Chapter, jwt: string, deviceSecret?: string | null): Promise<void> {
   const playbackId = selectMuxPlaybackId(chapter);
   if (!playbackId) throw new Error(`${chapter.title} has no downloadable video.`);
 
@@ -77,6 +77,7 @@ export async function queueChapterForOffline(chapter: Chapter, jwt: string): Pro
       jwt,
       chapter.courseId,
       Platform.OS === 'ios' ? 'ios' : undefined,
+      deviceSecret,
     ),
     fetchUserPreferences(jwt).catch(() => null),
   ]);

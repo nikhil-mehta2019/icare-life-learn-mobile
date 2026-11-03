@@ -2,17 +2,14 @@
 // move this to a runtime config fetched after auth, or use per-user signed
 // tokens served by a Base44 backend function.
 
-import { Platform } from 'react-native';
 import IcareOfflineDrm from '../modules/icare-offline-drm';
 
 export const BASE_URL = 'https://icare-life-learn.base44.app/api';
 export const API_KEY = '6af260f41e2140b9950788621360c5cf';
 
-// Base44 now rejects the account API key with 403 AccountApiKeyBlockedError, while the same
-// public requests succeed without it. Android keeps sending the key unchanged; iOS omits it.
+// Base44 rejects the account API key with 403 AccountApiKeyBlockedError on all platforms.
 const defaultHeaders: Record<string, string> = {
   'Content-Type': 'application/json',
-  ...(Platform.OS === 'android' ? { 'api_key': API_KEY } : {}),
 };
 
 export interface Course {
@@ -225,7 +222,8 @@ export async function getMuxDownloadToken(
   playbackId: string,
   jwt?: string,
   courseId?: string,
-  platform?: string
+  platform?: string,
+  deviceSecret?: string | null,
 ): Promise<MuxDownloadTokenResponse> {
   if (!jwt) {
     throw new Error('Your session must be refreshed before downloading. Please reconnect and try again.');
@@ -237,10 +235,12 @@ export async function getMuxDownloadToken(
       ...defaultHeaders,
       Authorization: `Bearer ${jwt}`,
     },
-    // courseId disambiguates chapters that share a playbackId across courses
-    // (e.g. the same Mux asset reused in two courses) so the server resolves
-    // access against the course the learner actually selected.
-    body: JSON.stringify({ playbackId, ...(courseId ? { courseId } : {}), ...(platform ? { platform } : {}) }),
+    body: JSON.stringify({
+      playbackId,
+      ...(courseId ? { courseId } : {}),
+      ...(platform ? { platform } : {}),
+      ...(deviceSecret ? { deviceSecret } : {}),
+    }),
   });
   const data = await response.json().catch(() => ({} as any));
   if (!response.ok) {
