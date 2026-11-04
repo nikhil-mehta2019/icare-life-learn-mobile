@@ -1038,7 +1038,7 @@ const styles = StyleSheet.create({
   webview: { flex: 1 },
   chatFab: {
     position: 'absolute',
-    bottom: 24,
+    bottom: 88,
     right: 20,
     width: 56,
     height: 56,
