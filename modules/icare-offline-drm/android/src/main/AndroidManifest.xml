@@ -5,5 +5,9 @@
       android:name="expo.modules.icareofflinedrm.OfflineDownloadService"
       android:foregroundServiceType="dataSync"
       android:exported="false" />
+    <activity
+      android:name="expo.modules.icareofflinedrm.OfflinePlayerActivity"
+      android:exported="false"
+      android:screenOrientation="landscape" />
   </application>
 </manifest>
