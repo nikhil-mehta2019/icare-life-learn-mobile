@@ -7,7 +7,7 @@
  * the device is offline.
  */
 
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 
 const STORE_FILE = `${FileSystem.documentDirectory}icare_progress.json`;
 
