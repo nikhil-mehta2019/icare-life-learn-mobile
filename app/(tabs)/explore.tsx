@@ -1017,10 +1017,18 @@ export default function ExploreScreen() {
             androidLayerType="hardware"
             userAgent="Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
             onShouldStartLoadWithRequest={(req) => req.url.startsWith('https://chat.icare.life') || req.url.startsWith('about:')}
+            injectedJavaScriptBeforeContentLoaded={`
+              (function() {
+                console.log('[chatbot] ReactNativeWebView available:', !!window.ReactNativeWebView);
+                console.log('[chatbot] speechSynthesis available:', !!window.speechSynthesis);
+              })(); true;
+            `}
             onMessage={(e) => {
               try {
                 const msg = JSON.parse(e.nativeEvent.data);
+                console.log('[chatbot-webview] message received:', JSON.stringify(msg).slice(0, 200));
                 if (msg?.type === 'SPEAK_TEXT' && typeof msg.text === 'string' && msg.text.trim()) {
+                  console.log('[chatbot-webview] SPEAK_TEXT → expo-speech:', msg.text.slice(0, 80));
                   Speech.stop();
                   Speech.speak(msg.text.trim(), { language: msg.language ?? 'en-GB' });
                 } else if (msg?.type === 'SPEAK_STOP') {
