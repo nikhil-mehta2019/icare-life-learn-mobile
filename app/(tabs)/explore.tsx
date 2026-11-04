@@ -47,8 +47,8 @@
  */
 
 import { useRouter, type Href } from 'expo-router';
-import { useCallback, useEffect, useRef } from 'react';
-import { Platform, StyleSheet } from 'react-native';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Modal, Platform, Pressable, SafeAreaView, StatusBar, StyleSheet, Text, View } from 'react-native';
 import { WebView, type WebViewMessageEvent } from 'react-native-webview';
 import type { ShouldStartLoadRequest } from 'react-native-webview/lib/WebViewTypes';
 import { deliverPlayerData, deliverPlayerError } from '../../api/playerCache';
@@ -122,6 +122,11 @@ const INJECTED_JS = `
 (function() {
   if (window.__icareNativeBridgeInstalled) return;
   window.__icareNativeBridgeInstalled = true;
+
+  // Signal to Base44 that we are running inside the native app WebView.
+  // The web app reads this flag to hide its own chatbot launcher buttons
+  // so the native chatbot modal is used instead (enabling top-level WebView TTS).
+  window.__ICARE_NATIVE_APP__ = true;
 
   // ── Logging helper ────────────────────────────────────────────────────────
   function log(level, msg, data) {
@@ -564,20 +569,62 @@ const INJECTED_JS = `
   log('info', 'Bridge installed');
   _postMessage({ type: 'BRIDGE_READY' });
 
+  // ── Unlock Web Audio + speechSynthesis on first user gesture ─────────────
+  // Android WebView starts AudioContext in 'suspended' state; speechSynthesis
+  // may also silently fail until a user gesture has been registered.
+  // We resume/cancel on the first touch so the AI assistant audio works.
+  (function _unlockAudio() {
+    var _unlocked = false;
+    function unlock() {
+      if (_unlocked) return;
+      _unlocked = true;
+      try {
+        var AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (AudioCtx) {
+          var ctx = new AudioCtx();
+          if (ctx.state === 'suspended') { ctx.resume(); }
+          // Create and immediately stop a silent buffer to register the gesture
+          var buf = ctx.createBuffer(1, 1, 22050);
+          var src = ctx.createBufferSource();
+          src.buffer = buf;
+          src.connect(ctx.destination);
+          src.start(0);
+          src.stop(0);
+        }
+      } catch (e) {}
+      try {
+        // Warm up speechSynthesis — a cancel() after any gesture unblocks it
+        if (window.speechSynthesis) { window.speechSynthesis.cancel(); }
+      } catch (e) {}
+      log('info', 'Audio context unlocked on user gesture');
+    }
+    document.addEventListener('touchstart', unlock, { once: true, passive: true });
+    document.addEventListener('click',      unlock, { once: true, passive: true });
+  })();
+
   // Send auth JWT to native immediately so the player can call getMuxToken
   // directly when the WebView is backgrounded (avoids backgrounded HTTP fetch).
+  // If no JWT is found after a 2-second grace period, send AUTH_CLEARED so
+  // native clears its cached JWT — the interval below can't catch this because
+  // injectedJavaScriptBeforeContentLoaded re-runs fresh on every page load,
+  // resetting _jwtWasPresent to false before the interval ever fires.
   (function _sendJwtToNative() {
     var jwt = _getLocalStorageJwt();
     if (jwt) {
       _postMessage({ type: 'AUTH_JWT', jwt: jwt });
       log('info', 'AUTH_JWT sent to native (' + jwt.length + ' chars)');
     } else {
-      // Retry after localStorage may have been populated by the app.
+      // No JWT yet — wait for localStorage to settle (login redirect may still
+      // be loading), then either send AUTH_JWT or AUTH_CLEARED.
       setTimeout(function() {
         var j = _getLocalStorageJwt();
         if (j) {
           _postMessage({ type: 'AUTH_JWT', jwt: j });
           log('info', 'AUTH_JWT sent to native (delayed, ' + j.length + ' chars)');
+        } else {
+          // Still no JWT after grace period — this is a logged-out page load.
+          _postMessage({ type: 'AUTH_CLEARED' });
+          log('info', 'AUTH_CLEARED sent — no JWT after 2s grace on page load');
         }
       }, 2000);
     }
@@ -653,6 +700,8 @@ const IOS_FULLSCREEN_JS = `
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
+const CHATBOT_URL = 'https://chat.icare.life/app/chatbot';
+
 export default function ExploreScreen() {
   // iOS: never leave the tab bar hidden / the app landscape if this screen goes away mid full screen.
   useEffect(() => () => {
@@ -662,6 +711,8 @@ export default function ExploreScreen() {
   }, []);
   const router = useRouter();
   const webRef = useRef<WebView>(null);
+  const [chatbotOpen, setChatbotOpen] = useState(false);
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
 
   /**
    * Triggers a fresh token fetch inside the WebView for a specific chapter.
@@ -823,12 +874,15 @@ export default function ExploreScreen() {
         case 'AUTH_JWT':
           if (typeof msg.jwt === 'string' && msg.jwt.length > 50) {
             _storeAuthJwt(msg.jwt);
+            setIsLoggedIn(true);
             console.log(`[explore] AUTH_JWT stored (${(msg.jwt as string).length} chars)`);
           }
           break;
 
         case 'AUTH_CLEARED':
           _clearAuthJwt();
+          setIsLoggedIn(false);
+          setChatbotOpen(false);
           console.log('[explore] AUTH_CLEARED — session ended');
           break;
 
@@ -906,36 +960,117 @@ export default function ExploreScreen() {
   }, [requestTokensFromWebView]);
 
   return (
-    <WebView
-      ref={webRef}
-      source={{ uri: BASE44_URL }}
-      style={styles.webview}
-      javaScriptEnabled
-      domStorageEnabled
-      sharedCookiesEnabled
-      thirdPartyCookiesEnabled
-      allowsInlineMediaPlayback
-      allowsFullscreenVideo
-      mediaPlaybackRequiresUserAction={false}
-      androidLayerType="hardware"
-      onLoadStart={() => {
-        // A fresh page load ends any full screen the previous page was in (iOS).
-        if (Platform.OS !== 'ios') return;
-        setWebFullscreen(false);
-        IcareOfflineDrm.setFullscreenLandscape(false);
-      }}
-      injectedJavaScriptBeforeContentLoaded={Platform.OS === 'ios' ? INJECTED_JS + IOS_FULLSCREEN_JS + IOS_WEB_FULLSCREEN_POLYFILL : INJECTED_JS}
-      onShouldStartLoadWithRequest={onShouldStartLoadWithRequest}
-      onMessage={onMessage}
-      userAgent="Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-    />
+    <View style={styles.container}>
+      <WebView
+        ref={webRef}
+        source={{ uri: BASE44_URL }}
+        style={styles.webview}
+        javaScriptEnabled
+        domStorageEnabled
+        sharedCookiesEnabled
+        thirdPartyCookiesEnabled
+        allowsInlineMediaPlayback
+        allowsFullscreenVideo
+        mediaPlaybackRequiresUserAction={false}
+        androidLayerType="hardware"
+        onLoadStart={() => {
+          // A fresh page load ends any full screen the previous page was in (iOS).
+          if (Platform.OS !== 'ios') return;
+          setWebFullscreen(false);
+          IcareOfflineDrm.setFullscreenLandscape(false);
+        }}
+        injectedJavaScriptBeforeContentLoaded={Platform.OS === 'ios' ? INJECTED_JS + IOS_FULLSCREEN_JS + IOS_WEB_FULLSCREEN_POLYFILL : INJECTED_JS}
+        onShouldStartLoadWithRequest={onShouldStartLoadWithRequest}
+        onMessage={onMessage}
+        userAgent="Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+      />
+
+      {/* Native chatbot FAB — only shown when logged in */}
+      {isLoggedIn && (
+        <Pressable
+          onPress={() => setChatbotOpen(true)}
+          style={styles.chatFab}
+          accessibilityLabel="Open iCare Assistant"
+          accessibilityRole="button"
+        >
+          <Text style={styles.chatFabIcon}>💬</Text>
+        </Pressable>
+      )}
+
+      {/* Native chatbot modal — top-level WebView so speechSynthesis works */}
+      <Modal
+        visible={chatbotOpen}
+        animationType="slide"
+        onRequestClose={() => setChatbotOpen(false)}
+        statusBarTranslucent
+      >
+        <SafeAreaView style={styles.chatModal}>
+          <StatusBar barStyle="light-content" backgroundColor="#1F1028" />
+          <WebView
+            source={{ uri: CHATBOT_URL }}
+            style={styles.chatWebview}
+            javaScriptEnabled
+            domStorageEnabled
+            mediaPlaybackRequiresUserAction={false}
+            allowsInlineMediaPlayback
+            androidLayerType="hardware"
+            userAgent="Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+            onShouldStartLoadWithRequest={(req) => req.url.startsWith('https://chat.icare.life') || req.url.startsWith('about:')}
+          />
+          <Pressable
+            onPress={() => setChatbotOpen(false)}
+            style={styles.chatClose}
+            accessibilityLabel="Close iCare Assistant"
+            accessibilityRole="button"
+          >
+            <View style={styles.chatCloseBar} />
+          </Pressable>
+        </SafeAreaView>
+      </Modal>
+    </View>
   );
 }
 
 // ─── Styles ──────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
+  container: { flex: 1 },
   webview: { flex: 1 },
+  chatFab: {
+    position: 'absolute',
+    bottom: 24,
+    right: 20,
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: '#6D3F80',
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 6,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+  },
+  chatFabIcon: {
+    fontSize: 24,
+  },
+  chatModal: {
+    flex: 1,
+    backgroundColor: '#1F1028',
+  },
+  chatWebview: { flex: 1 },
+  chatClose: {
+    alignItems: 'center',
+    paddingVertical: 12,
+    backgroundColor: '#1F1028',
+  },
+  chatCloseBar: {
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: 'rgba(255,255,255,0.3)',
+  },
 });
 
 // ─── Token requester registry ─────────────────────────────────────────────────
