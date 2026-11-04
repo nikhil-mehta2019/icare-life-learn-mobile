@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useFocusEffect } from 'expo-router';
 import {
   ActivityIndicator,
   Alert,
@@ -63,6 +64,14 @@ type CourseLoadState = 'loading' | 'done' | 'error';
 
 export default function DownloadManagerScreen() {
   const router = useRouter();
+
+  // Route guard: redirect to explore if not authenticated.
+  useFocusEffect(useCallback(() => {
+    if (getAuthJwt() === null) {
+      router.replace('/(tabs)/explore' as any);
+    }
+  }, [router]));
+
   const [bundles, setBundles] = useState<CourseBundle[]>([]);
   const [courseStates, setCourseStates] = useState<Record<string, CourseLoadState>>({});
   const [downloads, setDownloads] = useState<Record<string, DownloadInfo>>({});

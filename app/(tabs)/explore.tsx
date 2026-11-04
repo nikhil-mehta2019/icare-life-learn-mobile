@@ -605,6 +605,23 @@ const INJECTED_JS = `
 
   // Check current URL in case the WebView was restored on a chapter URL.
   setTimeout(checkUrl, 800);
+
+  // Poll for JWT removal every 3 s to detect logout / session expiry.
+  // Only fires after a JWT has been confirmed present, so it never triggers
+  // on cold start before the user has logged in.
+  var _jwtWasPresent = !!_getLocalStorageJwt();
+  setInterval(function() {
+    var hasJwt = !!_getLocalStorageJwt();
+    if (_jwtWasPresent && !hasJwt) {
+      _jwtWasPresent = false;
+      _postMessage({ type: 'AUTH_CLEARED' });
+      log('info', 'AUTH_CLEARED sent — JWT removed from localStorage');
+    } else if (!_jwtWasPresent && hasJwt) {
+      // JWT reappeared (re-login without page reload) — re-send AUTH_JWT
+      _jwtWasPresent = true;
+    }
+  }, 3000);
+
   true;
 })();
 `.trim();
@@ -810,6 +827,11 @@ export default function ExploreScreen() {
           }
           break;
 
+        case 'AUTH_CLEARED':
+          _clearAuthJwt();
+          console.log('[explore] AUTH_CLEARED — session ended');
+          break;
+
         case 'FULLSCREEN_CHANGE':
           // iOS: the web player went full screen / back (see IOS_FULLSCREEN_JS).
           console.log(`[explore] FULLSCREEN_CHANGE active=${String(msg.active)} source=${String(msg.source)}`);
@@ -938,8 +960,23 @@ function _setTokenRequester(fn: ((chapterId: string) => void) | null): void {
 let _authJwt: string | null = null;
 let _deviceSecret: string | null = null;
 
+type AuthListener = (isAuthenticated: boolean) => void;
+const _authListeners = new Set<AuthListener>();
+
+export function subscribeToAuth(listener: AuthListener): () => void {
+  _authListeners.add(listener);
+  return () => { _authListeners.delete(listener); };
+}
+
 function _storeAuthJwt(jwt: string): void {
   _authJwt = jwt;
+  _authListeners.forEach((fn) => fn(true));
+}
+
+function _clearAuthJwt(): void {
+  _authJwt = null;
+  _deviceSecret = null;
+  _authListeners.forEach((fn) => fn(false));
 }
 
 function _storeDeviceSecret(secret: string): void {

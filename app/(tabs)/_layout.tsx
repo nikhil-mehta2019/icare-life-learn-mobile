@@ -1,7 +1,9 @@
 import { Tabs } from 'expo-router';
+import { useEffect, useState } from 'react';
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import type { BottomTabBarProps } from '@react-navigation/bottom-tabs';
 import { useWebFullscreen } from '../../store/webFullscreen';
+import { getAuthJwt, subscribeToAuth } from './explore';
 
 const BOTTOM_INSET = Platform.OS === 'ios' ? 28 : 12;
 
@@ -22,7 +24,13 @@ export default function TabLayout() {
 function OfflineLearningBar({ state, navigation }: BottomTabBarProps) {
   // iOS: hide the bar while the online player is full screen (never true on other platforms).
   const webFullscreen = useWebFullscreen();
+
+  // Hide both download buttons when not authenticated.
+  const [isAuthenticated, setIsAuthenticated] = useState(() => getAuthJwt() !== null);
+  useEffect(() => subscribeToAuth(setIsAuthenticated), []);
+
   if (webFullscreen) return null;
+  if (!isAuthenticated) return null;
 
   const downloadsIdx = state.routes.findIndex((r) => r.name === 'downloads');
   const managerIdx = state.routes.findIndex((r) => r.name === 'download-manager');

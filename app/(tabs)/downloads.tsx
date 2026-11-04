@@ -1,4 +1,4 @@
-import { useRouter, type Href } from 'expo-router';
+import { useFocusEffect, useRouter, type Href } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -21,6 +21,7 @@ import IcareOfflineDrm, {
   type DownloadInfo,
 } from '../../modules/icare-offline-drm';
 import { getAllProgress, type ChapterProgress } from '../../store/offlineProgress';
+import { getAuthJwt } from './explore';
 
 const BG = '#0F1923';
 const CARD_BG = '#1C2B35';
@@ -438,6 +439,14 @@ function courseLabel(course?: { title?: string; catalogMarket?: string } | null)
 
 export default function DownloadsScreen() {
   const router = useRouter();
+
+  // Route guard: redirect to explore if not authenticated.
+  useFocusEffect(useCallback(() => {
+    if (getAuthJwt() === null) {
+      router.replace('/(tabs)/explore' as any);
+    }
+  }, [router]));
+
   const [items, setItems] = useState<DownloadInfo[]>([]);
   const [progressMap, setProgressMap] = useState<Record<string, ChapterProgress>>({});
   const [entitlementMap, setEntitlementMap] = useState<Record<string, DownloadEntitlement | null>>({});
