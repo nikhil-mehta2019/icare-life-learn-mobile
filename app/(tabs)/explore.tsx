@@ -49,6 +49,7 @@
 import { useRouter, type Href } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Modal, Platform, Pressable, SafeAreaView, StatusBar, StyleSheet, Text, View } from 'react-native';
+import * as Speech from 'expo-speech';
 import { WebView, type WebViewMessageEvent } from 'react-native-webview';
 import type { ShouldStartLoadRequest } from 'react-native-webview/lib/WebViewTypes';
 import { deliverPlayerData, deliverPlayerError } from '../../api/playerCache';
@@ -1016,6 +1017,17 @@ export default function ExploreScreen() {
             androidLayerType="hardware"
             userAgent="Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
             onShouldStartLoadWithRequest={(req) => req.url.startsWith('https://chat.icare.life') || req.url.startsWith('about:')}
+            onMessage={(e) => {
+              try {
+                const msg = JSON.parse(e.nativeEvent.data);
+                if (msg?.type === 'SPEAK_TEXT' && typeof msg.text === 'string' && msg.text.trim()) {
+                  Speech.stop();
+                  Speech.speak(msg.text.trim(), { language: msg.language ?? 'en-GB' });
+                } else if (msg?.type === 'SPEAK_STOP') {
+                  Speech.stop();
+                }
+              } catch { /* ignore non-JSON */ }
+            }}
           />
           <Pressable
             onPress={() => setChatbotOpen(false)}
